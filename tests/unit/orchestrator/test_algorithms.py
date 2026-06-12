@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 import pytest
 import verifiers as vf
 
-from prime_rl.configs.algorithm import AlgorithmConfig, FrozenModelConfig
+from prime_rl.configs.algorithm import AlgorithmConfig, FrozenModelConfig, StaticDatasetConfig
 from prime_rl.orchestrator.algo import EchoAlgorithm, stamp_advantages, stamp_loss_routing
 from prime_rl.orchestrator.trajectories import interleave_rollout
 from prime_rl.orchestrator.types import TrainRollout
@@ -15,6 +15,8 @@ FROZEN = {"name": "org/ref-model", "base_url": ["http://ref:8001/v1"]}
 
 def _ref_kind(ref):
     """Collapse a resolved reference to a comparable marker."""
+    if isinstance(ref, StaticDatasetConfig):
+        return "static"
     return "frozen" if isinstance(ref, FrozenModelConfig) else ref
 
 
@@ -25,12 +27,16 @@ def _ref_kind(ref):
         ("max_rl", None, "policy", None, "rl"),
         ("opd", FROZEN, "policy", "frozen", "ref_kl"),
         ("sft", FROZEN, "frozen", None, "ce"),
+        ("sft_static", None, "static", None, "ce"),
         ("opsd", None, "policy", "policy", "ref_kl"),
         ("echo", None, "policy", None, "rl"),
     ],
 )
 def test_type_defaults_are_the_vetted_algorithms(advantage_type, model, source, advantage_model, action_loss_type):
-    algo = AlgorithmConfig(advantage={"type": advantage_type}, model=model)
+    kwargs = {"advantage": {"type": advantage_type}, "model": model}
+    if advantage_type == "sft_static":
+        kwargs["sampling"] = {"source": {"type": "dataset", "name": "org/static-sft"}}
+    algo = AlgorithmConfig(**kwargs)
     assert _ref_kind(algo.sampling.source) == source
     assert algo.advantage.type == advantage_type
     assert _ref_kind(getattr(algo.advantage, "model", None)) == advantage_model
@@ -66,6 +72,19 @@ def test_opd_requires_teacher():
 def test_sft_requires_teacher():
     with pytest.raises(ValueError, match="needs a teacher to sample rollouts from"):
         AlgorithmConfig(advantage={"type": "sft"})
+
+
+def test_static_sft_requires_static_dataset_source():
+    with pytest.raises(ValueError, match="sampling.source.type='dataset'"):
+        AlgorithmConfig(advantage={"type": "sft_static"})
+
+
+def test_static_dataset_source_uses_static_sft():
+    with pytest.raises(ValueError, match="uses advantage.type='sft_static'"):
+        AlgorithmConfig(
+            sampling={"source": {"type": "dataset", "name": "org/static-sft"}},
+            advantage={"type": "sft"},
+        )
 
 
 def test_teacher_aliases_model_shorthand():

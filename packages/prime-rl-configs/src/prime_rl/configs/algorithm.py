@@ -62,6 +62,39 @@ ModelReference: TypeAlias = Literal["policy"] | FrozenModelConfig
 version, sampling logprobs carried, rollouts age off-policy) or an inline
 externally-hosted frozen model."""
 
+
+class StaticDatasetConfig(BaseConfig):
+    """A Hugging Face dataset used as precomputed supervised trajectories."""
+
+    type: Literal["dataset"] = "dataset"
+
+    name: str
+    """Dataset path accepted by ``datasets.load_dataset``."""
+
+    split: str = "train"
+    """Dataset split to load."""
+
+    subset: str | None = None
+    """Optional dataset subset/config name."""
+
+    messages_column: str = "messages"
+    """Whole-chat messages column. Takes precedence when present."""
+
+    prompt_column: str = "prompt"
+    """Prompt column used with ``completion_column`` when no messages column is present."""
+
+    completion_column: str = "completion"
+    """Completion column used with ``prompt_column`` when no messages column is present."""
+
+    tools_column: str = "tools"
+    """Optional tools column; ``tool_defs`` is also accepted for rollout-shaped rows."""
+
+    max_examples: int | None = Field(None, ge=1)
+    """Optional cap on loaded examples for smoke tests and small runs."""
+
+
+SamplingSource: TypeAlias = ModelReference | StaticDatasetConfig
+
 ActionLossType: TypeAlias = Literal["rl", "ce", "ref_kl"]
 
 
@@ -71,11 +104,10 @@ ActionLossType: TypeAlias = Literal["rl", "ce", "ref_kl"]
 
 
 class SamplingConfig(BaseConfig):
-    source: ModelReference = "policy"
-    """Model reference for train rollout generation: ``"policy"`` (the live
-    policy — prefix caches salted per version, sampling logprobs requested,
-    rollouts age off-policy) or an inline frozen hosted model (stable prefix
-    cache, no sampling logprobs, rollouts never go stale)."""
+    source: SamplingSource = "policy"
+    """Train rollout source: ``"policy"`` (live policy), an inline frozen
+    hosted model (hard distillation), or a static Hugging Face dataset of
+    supervised messages (static SFT)."""
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +308,17 @@ class SFTAdvantageConfig(BaseConfig):
     tokens is rejected at validation."""
 
 
+class StaticSFTAdvantageConfig(BaseConfig):
+    type: Literal["sft_static"] = "sft_static"
+    """Static SFT: cross-entropy on assistant messages loaded from a dataset.
+
+    No reward or group-relative scalar is assigned; the dataset row itself is
+    the supervised target, and advantage-based filters skip it."""
+
+    action_loss_type: ClassVar[ActionLossType] = "ce"
+    group_relative: ClassVar[bool] = False
+
+
 class CustomAdvantageConfig(BaseConfig):
     type: Literal["custom"] = "custom"
     """Custom advantage function, consumed by the ``rl`` loss component. Returns
@@ -300,6 +343,7 @@ AdvantageConfig: TypeAlias = Annotated[
     | OPDAdvantageConfig
     | OPSDAdvantageConfig
     | SFTAdvantageConfig
+    | StaticSFTAdvantageConfig
     | CustomAdvantageConfig,
     Field(discriminator="type"),
 ]
@@ -323,6 +367,7 @@ class AlgorithmConfig(BaseConfig):
     - ``opd`` — on-policy distillation: policy samples, per-token reverse KL against a reference model. Needs ``teacher``.
     - ``opsd`` — SDFT: policy samples, demo-conditioned reverse KL against the live policy by default.
     - ``sft`` — a frozen model samples, the policy trains with CE on its tokens. Needs ``teacher``.
+    - ``sft_static`` — a static HF dataset provides assistant messages, the policy trains with CE.
     - ``echo`` — GRPO on action tokens + weighted CE on tool-response observation tokens.
     - ``reward`` / ``custom`` — raw-reward and user-supplied advantage functions.
     """
@@ -413,6 +458,14 @@ class AlgorithmConfig(BaseConfig):
                 "the importance ratio and trust region need the live policy's own sampling logprobs. "
                 "Use the 'sft' advantage to distill frozen-model tokens."
             )
+        if isinstance(self.advantage, StaticSFTAdvantageConfig) and not isinstance(
+            self.sampling.source, StaticDatasetConfig
+        ):
+            raise ValueError(
+                "advantage 'sft_static' needs sampling.source.type='dataset' with a Hugging Face dataset."
+            )
+        if isinstance(self.advantage, SFTAdvantageConfig) and isinstance(self.sampling.source, StaticDatasetConfig):
+            raise ValueError("static dataset sampling uses advantage.type='sft_static', not 'sft'.")
         return self
 
     def warn_group_size(self, group_size: int, env_name: str) -> None:

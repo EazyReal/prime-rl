@@ -30,6 +30,20 @@ from prime_rl.transport import TrainingSample
 from prime_rl.utils.logger import get_logger
 
 
+def _token_usage_from_samples(samples: list[TrainingSample]) -> dict[str, float]:
+    input_tokens = 0
+    output_tokens = 0
+    for sample in samples:
+        output_tokens += sum(sample.completion_mask)
+        input_tokens += len(sample.prompt_ids) + len(sample.completion_mask) - sum(sample.completion_mask)
+    return {
+        "input_tokens": float(input_tokens),
+        "output_tokens": float(output_tokens),
+        "final_input_tokens": float(input_tokens),
+        "final_output_tokens": float(output_tokens),
+    }
+
+
 class TrainSink:
     """Three-level train sink. Constructed once, fed via ``add(rollout)``."""
 
@@ -164,6 +178,7 @@ class TrainSink:
             )
         )
         rollout.samples = samples or []
+        raw["token_usage"] = _token_usage_from_samples(rollout.samples)
         # Offload base64 image bytes to disk as soon as the rollout is
         # tokenized, so memory stays flat instead of holding every buffered
         # rollout's images until the batch ships (no-op for text-only).

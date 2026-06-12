@@ -20,3 +20,11 @@ class SFTDistillAlgorithm(Algorithm):
 
     def assign(self, rollouts: list[TrainRollout]) -> None:
         assign_group_norm(rollouts, None)
+
+
+class StaticSFTAlgorithm(Algorithm):
+    """Static supervised fine-tuning from dataset-provided assistant messages.
+
+    No scalar credit is assigned; action tokens are routed directly to CE."""
+
+    action_loss_type = "ce"

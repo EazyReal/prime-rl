@@ -14,6 +14,7 @@ from verifiers.utils.serve_utils import get_free_port
 from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig, TrainEnvConfig
 from prime_rl.orchestrator.algo import Algorithm, build_algorithm
 from prime_rl.orchestrator.sampler import Sampler
+from prime_rl.orchestrator.static_sft import load_static_sft_rows, static_sft_rollout
 from prime_rl.utils.logger import get_logger
 
 REQUIRED_STATE_COLUMNS = ["trajectory"]
@@ -164,13 +165,41 @@ class TrainEnv(Env):
     config: TrainEnvConfig
 
     def __init__(self, config: TrainEnvConfig, sampler: Sampler, algorithm: Algorithm):
-        super().__init__(config)
+        if not sampler.samples_from_static_dataset:
+            super().__init__(config)
+        else:
+            self.config = config
+            self.sampling_args = {}
+            self._env = None
+            self._env_client = None
+            self._env_server_process = None
         self.sampler = sampler
         self.algorithm = algorithm
         self.sampling_args = sampler.sampling_args(config.sampling.to_sampling_args())
 
+    @property
+    def requires_group_scoring(self) -> bool:
+        if self.sampler.samples_from_static_dataset:
+            return False
+        return super().requires_group_scoring
+
+    async def start(
+        self,
+        log_dir: Path,
+        log_level: str | None = None,
+        json_logging: bool = False,
+    ) -> None:
+        if self.sampler.samples_from_static_dataset:
+            return
+        await super().start(log_dir=log_dir, log_level=log_level, json_logging=json_logging)
+
     def get_dataset(self, seed: int | None = None):
+        if self.sampler.samples_from_static_dataset:
+            return load_static_sft_rows(self.sampler.static_dataset, seed=seed)
         return self.env.get_dataset(seed=seed)
+
+    async def run_static_rollout(self, example: dict) -> vf.RolloutOutput:
+        return static_sft_rollout(example, self.sampler.static_dataset)
 
 
 class EvalEnv(Env):

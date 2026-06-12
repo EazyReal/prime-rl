@@ -11,6 +11,7 @@ from renderers import AutoRendererConfig, RendererConfig
 from prime_rl.configs.algorithm import (
     AdvantageConfig,
     AlgorithmConfig,
+    StaticDatasetConfig,
 )
 from prime_rl.configs.shared import (
     BaseModelConfig,
@@ -736,6 +737,14 @@ class OrchestratorConfig(BaseConfig):
         """True when at least one train env samples rollouts from the live policy."""
         return any(env.algo is not None and env.algo.sampling.source == "policy" for env in self.train.env)
 
+    @property
+    def any_static_dataset_sourced(self) -> bool:
+        """True when at least one train env loads supervised traces locally."""
+        return any(
+            env.algo is not None and isinstance(env.algo.sampling.source, StaticDatasetConfig)
+            for env in self.train.env
+        )
+
     @model_validator(mode="after")
     def _force_no_renderer_without_policy_sampling(self):
         """Frozen-sourced rollouts go through the frozen model's plain
@@ -743,7 +752,7 @@ class OrchestratorConfig(BaseConfig):
         train env samples from the policy, force ``renderer=None`` so the user
         doesn't have to remember to set it. Declared before the renderer
         validators below so they see the corrected value."""
-        if not self.any_policy_sourced:
+        if not self.any_policy_sourced and not self.any_static_dataset_sourced:
             self.renderer = None
         return self
 
@@ -873,6 +882,8 @@ class OrchestratorConfig(BaseConfig):
             if "group_size" not in env_cfg.model_fields_set:
                 env_cfg.group_size = self.group_size
             assert env_cfg.algo is not None  # materialized by inherit_env_algorithms
+            if env_cfg.algo.advantage.type == "sft_static" and env_cfg.group_size != 1:
+                raise ValueError("sft_static requires group_size=1 because dataset rows are already fixed targets")
             env_cfg.algo.warn_group_size(env_cfg.group_size, env_cfg.resolved_name)
 
         # Resolve train env num_workers from max_inflight_rollouts

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from prime_rl.configs.algorithm import FrozenModelConfig, SamplingConfig
+from prime_rl.configs.algorithm import FrozenModelConfig, SamplingConfig, StaticDatasetConfig
 from prime_rl.orchestrator.algo import connect_frozen_pool
 
 if TYPE_CHECKING:
@@ -42,6 +42,15 @@ class Sampler:
     @property
     def samples_from_live_policy(self) -> bool:
         return self.config.source == "policy"
+
+    @property
+    def samples_from_static_dataset(self) -> bool:
+        return isinstance(self.config.source, StaticDatasetConfig)
+
+    @property
+    def static_dataset(self) -> StaticDatasetConfig:
+        assert isinstance(self.config.source, StaticDatasetConfig)
+        return self.config.source
 
     def sampling_args(self, args: dict) -> dict:
         """Source-specific sampling-arg overrides. Sampling logprobs are only

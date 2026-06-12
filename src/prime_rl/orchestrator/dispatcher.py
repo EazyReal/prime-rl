@@ -386,6 +386,27 @@ class RolloutDispatcher:
         ready, no permits). Returns True after issuing one task — the caller
         loops to keep scheduling.
         """
+        env_collection = self.train_envs if group.kind == "train" else self.eval_envs
+        if env_collection is None:
+            return False
+        env = env_collection.get(group.env_name)
+
+        if group.kind == "train" and env.sampler.samples_from_static_dataset:
+            permits = 1
+            group.rollouts_to_schedule -= 1
+            await self.acquire(permits)
+            task = asyncio.create_task(env.run_static_rollout(group.example))
+            self.inflight[task] = InflightRollout(
+                kind=group.kind,
+                env_name=group.env_name,
+                group_id=group_id,
+                policy_version=group.policy_version_at_start,
+                rollout_count=permits,
+                client_config=None,
+                eval_step=group.eval_step,
+            )
+            return True
+
         # Train rollouts use the env sampler's pool via the
         # renderer/token train client. Eval always evaluates the policy and
         # goes through the eval client (chat-completions) — the same path the
@@ -411,10 +432,6 @@ class RolloutDispatcher:
         else:
             client = group.pinned_client
 
-        env_collection = self.train_envs if group.kind == "train" else self.eval_envs
-        if env_collection is None:
-            return False
-        env = env_collection.get(group.env_name)
         # Frozen-sourced train rollouts hit a frozen pool; salting per policy
         # version would invalidate its prefix cache every weight update for
         # no reason.

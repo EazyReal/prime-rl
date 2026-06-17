@@ -19,7 +19,7 @@ batch_size = 128
 group_size = 4
 
 [orchestrator.algo.advantage]
-type = "sft"
+type = "sft_distill"
 
 [orchestrator.algo.teacher]
 name = "openai/gpt-5-mini"

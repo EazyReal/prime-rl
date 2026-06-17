@@ -27,7 +27,7 @@ def _ref_kind(ref):
         ("grpo", None, "policy", None, "rl"),
         ("max_rl", None, "policy", None, "rl"),
         ("opd", FROZEN, "policy", "frozen", "ref_kl"),
-        ("sft", FROZEN, "frozen", None, "ce"),
+        ("sft_distill", FROZEN, "frozen", None, "ce"),
         ("sft_static", None, "static", None, "ce"),
         ("opsd", None, "policy", "policy", "ref_kl"),
         ("echo", None, "policy", None, "rl"),
@@ -70,9 +70,9 @@ def test_opd_requires_teacher():
         AlgorithmConfig(advantage={"type": "opd"})
 
 
-def test_sft_requires_teacher():
+def test_sft_distill_requires_teacher():
     with pytest.raises(ValueError, match="needs a teacher to sample rollouts from"):
-        AlgorithmConfig(advantage={"type": "sft"})
+        AlgorithmConfig(advantage={"type": "sft_distill"})
 
 
 def test_static_sft_requires_static_dataset_source():
@@ -84,7 +84,7 @@ def test_static_dataset_source_uses_static_sft():
     with pytest.raises(ValueError, match="uses advantage.type='sft_static'"):
         AlgorithmConfig(
             sampling={"source": {"type": "dataset", "name": "org/static-sft"}},
-            advantage={"type": "sft"},
+            advantage={"type": "sft_distill"},
         )
 
 

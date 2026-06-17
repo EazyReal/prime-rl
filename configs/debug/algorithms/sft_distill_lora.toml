@@ -20,7 +20,7 @@ batch_size = 128
 group_size = 4
 
 [orchestrator.algo.advantage]
-type = "sft"
+type = "sft_distill"
 
 [orchestrator.algo.teacher]
 name = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-RL"

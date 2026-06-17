@@ -67,7 +67,7 @@ ALGORITHM_CLASSES: dict[str, type[Algorithm]] = {
     "max_rl": MaxRLAlgorithm,
     "opd": OPDAlgorithm,
     "opsd": OPSDAlgorithm,
-    "sft": SFTDistillAlgorithm,
+    "sft_distill": SFTDistillAlgorithm,
     "sft_static": StaticSFTAlgorithm,
     "reward": RewardAlgorithm,
     "custom": CustomAlgorithm,

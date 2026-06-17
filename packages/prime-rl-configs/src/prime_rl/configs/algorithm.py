@@ -293,9 +293,9 @@ class OPSDAdvantageConfig(BaseConfig):
     """Maximum concurrent prefill requests per batch."""
 
 
-class SFTAdvantageConfig(BaseConfig):
-    type: Literal["sft"] = "sft"
-    """SFT distillation: cross-entropy on the sampled tokens. The ``ce``
+class SFTDistillAdvantageConfig(BaseConfig):
+    type: Literal["sft_distill"] = "sft_distill"
+    """SFT distillation: cross-entropy on a teacher's sampled tokens. The ``ce``
     loss component ignores scalar advantages, but group-relative scalars are still
     assigned so reward-based filtering keeps working (the zero-advantage
     filter drops uniform-reward groups)."""
@@ -342,7 +342,7 @@ AdvantageConfig: TypeAlias = Annotated[
     | RewardAdvantageConfig
     | OPDAdvantageConfig
     | OPSDAdvantageConfig
-    | SFTAdvantageConfig
+    | SFTDistillAdvantageConfig
     | StaticSFTAdvantageConfig
     | CustomAdvantageConfig,
     Field(discriminator="type"),
@@ -366,7 +366,7 @@ class AlgorithmConfig(BaseConfig):
     - ``max_rl`` — GRPO with mean-normalized advantages (maximum-likelihood RL).
     - ``opd`` — on-policy distillation: policy samples, per-token reverse KL against a reference model. Needs ``teacher``.
     - ``opsd`` — SDFT: policy samples, demo-conditioned reverse KL against the live policy by default.
-    - ``sft`` — a frozen model samples, the policy trains with CE on its tokens. Needs ``teacher``.
+    - ``sft_distill`` — a frozen model samples, the policy trains with CE on its tokens. Needs ``teacher``.
     - ``sft_static`` — a static HF dataset provides assistant messages, the policy trains with CE.
     - ``echo`` — GRPO on action tokens + weighted CE on tool-response observation tokens.
     - ``reward`` / ``custom`` — raw-reward and user-supplied advantage functions.
@@ -456,14 +456,16 @@ class AlgorithmConfig(BaseConfig):
                 f"advantage '{self.advantage.type}' trains with the "
                 f"{self.advantage.action_loss_type} loss type but sampling.source is a frozen model — "
                 "the importance ratio and trust region need the live policy's own sampling logprobs. "
-                "Use the 'sft' advantage to distill frozen-model tokens."
+                "Use the 'sft_distill' advantage to distill frozen-model tokens."
             )
         if isinstance(self.advantage, StaticSFTAdvantageConfig) and not isinstance(
             self.sampling.source, StaticDatasetConfig
         ):
             raise ValueError("advantage 'sft_static' needs sampling.source.type='dataset' with a Hugging Face dataset.")
-        if isinstance(self.advantage, SFTAdvantageConfig) and isinstance(self.sampling.source, StaticDatasetConfig):
-            raise ValueError("static dataset sampling uses advantage.type='sft_static', not 'sft'.")
+        if isinstance(self.advantage, SFTDistillAdvantageConfig) and isinstance(
+            self.sampling.source, StaticDatasetConfig
+        ):
+            raise ValueError("static dataset sampling uses advantage.type='sft_static', not 'sft_distill'.")
         return self
 
     def warn_group_size(self, group_size: int, env_name: str) -> None:

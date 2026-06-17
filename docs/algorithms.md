@@ -50,7 +50,7 @@ base_url = ["http://localhost:8001/v1"]
 
 Model *roles* are labels the algorithm itself declares over these references — the distillation algorithms declare their reference's role as `teacher`, so `[orchestrator.algo.teacher]` parses as an alias for the `model` shorthand and validation errors speak the same language ("advantage 'opd' needs a teacher"). No role exists outside the algorithm that declares it: the dispatcher, sink, and trainer branch on liveness alone, never on what an algorithm calls a model.
 
-`algo.model` (alias: `algo.teacher`) is shorthand for the slot the advantage type declares for its reference — `advantage.model` for `opd` / `opsd`, `sampling.source` for `sft` (its teacher is the sampling source). A slot you didn't set takes the shorthand; an explicit reference that already equals it is accepted, a disagreeing one is an error. Set the component fields directly for multi-model setups.
+`algo.model` (alias: `algo.teacher`) is shorthand for the slot the advantage type declares for its reference — `advantage.model` for `opd` / `opsd`, `sampling.source` for `sft_distill` (its teacher is the sampling source). A slot you didn't set takes the shorthand; an explicit reference that already equals it is accepted, a disagreeing one is an error. Set the component fields directly for multi-model setups.
 
 Liveness is a property of the reference, not of any role: rollouts sampled from `"policy"` get version-salted prefix caches, carry sampling logprobs for importance ratios, and age off-policy as weights update; rollouts and scores from frozen models get a stable prefix cache and never go stale. Frozen models are externally hosted (`base_url` is required) — `prime-rl` never launches or updates them, and each env's algorithm builds its own client pool to the endpoints it declares.
 
@@ -68,7 +68,7 @@ type = "grpo"  # the default
 | `grpo` | policy | `rl` on actions | Standard group-relative RL. |
 | `max_rl` | policy | `rl` on actions | MaxRL ([arXiv:2602.02710](https://arxiv.org/abs/2602.02710)): GRPO's centered reward normalized by the group **mean** instead of the standard deviation — the gradient is unbiased for the order-`group_size` truncation of the maximum-likelihood objective, upweighting hard examples like `1/p`. |
 | `opd` | policy | `ref_kl` on actions | On-policy distillation ([Thinking Machines](https://thinkingmachines.ai/blog/on-policy-distillation/)): the policy samples, per-token reverse KL against a reference model as the gradient signal. Needs a `teacher`. |
-| `sft` | *(the teacher)* | `ce` on actions | Hard distillation: a frozen model generates rollouts, the policy trains with CE on its tokens. Needs a `teacher` (folds into `sampling.source`). |
+| `sft_distill` | *(the teacher)* | `ce` on actions | Hard distillation: a frozen model generates rollouts, the policy trains with CE on its tokens. Needs a `teacher` (folds into `sampling.source`). |
 | `opsd` | policy | `ref_kl` on actions | SDFT ([arXiv:2601.19897](https://arxiv.org/abs/2601.19897)): the model is its own reference, conditioned on an expert demonstration. Defaults to the live policy (the paper's setting, no extra deployment); set an inline `model` to score under a frozen copy instead. |
 | `echo` | policy | `rl` on actions + weighted `ce` on observations | ECHO: standard GRPO plus a cross-entropy loss on env-provided tokens already present in the rollout, selected by message role (needs the renderer's role attribution). Defaults to tool-response bodies at `alpha = 0.1` (ECHO's λ); set `roles` to train other roles, each at its own weight. |
 | `reward` | policy | `rl` on actions | REINFORCE-style: advantage = raw reward, no group baseline. |
@@ -111,7 +111,7 @@ kwargs = { patterns = ["WARNING"] }
 def drop_warnings(rollout, *, patterns: list[str]) -> list[list[bool]]: ...
 ```
 
-Component compatibility is validated at config time: frozen-model sampling can only feed the `ce` loss component — the `rl` and `ref_kl` components need the live policy's own sampling logprobs for importance ratios — `opd` pointed at `"policy"` is rejected as degenerate (zero KL), `sft` without a frozen source is rejected (CE on the policy's own tokens is not a distillation target), and group-relative advantage with `group_size = 1` warns that every advantage collapses to zero.
+Component compatibility is validated at config time: frozen-model sampling can only feed the `ce` loss component — the `rl` and `ref_kl` components need the live policy's own sampling logprobs for importance ratios — `opd` pointed at `"policy"` is rejected as degenerate (zero KL), `sft_distill` without a frozen source is rejected (CE on the policy's own tokens is not a distillation target), and group-relative advantage with `group_size = 1` warns that every advantage collapses to zero.
 
 ### Per-Env Algorithms
 
@@ -140,7 +140,7 @@ At runtime, each env's resolved config builds two objects: a `Sampler` (`prime_r
 | `max_rl` | `MaxRLAlgorithm` | `score_group`: mean-normalized group credit |
 | `opd` | `OPDAlgorithm` | `score_batch`: own-context prefill under the teacher |
 | `opsd` | `OPSDAlgorithm` | `score_batch`: demo-conditioned prefill under the teacher |
-| `sft` | `SFTDistillAlgorithm` | `score_group`: group-norm credit (feeds filters) |
+| `sft_distill` | `SFTDistillAlgorithm` | `score_group`: group-norm credit (feeds filters) |
 | `reward` | `RewardAlgorithm` | `score_rollout`: raw reward |
 | `custom` | `CustomAlgorithm` | `score_group`: your function |
 
@@ -178,7 +178,7 @@ $$
 $$
 
 - `rl` — the configured RL loss (`[trainer.loss]`): DPPO + KL by default, or a [custom loss](#custom-loss). Fed by the group-relative advantage strategies (`grpo`, `max_rl`, `reward`, `custom`, and `echo`'s action tokens).
-- `ce` — masked NLL. Used for frozen-model tokens (`sft`) and env-observation tokens (`echo`).
+- `ce` — masked NLL. Used for frozen-model tokens (`sft_distill`) and env-observation tokens (`echo`).
 - `ref_kl` — the per-token reverse KL to a reference model ($\log \pi_{\text{ref}} - \log \pi$) as the policy-gradient signal, importance-ratio corrected with a one-sided trust region (`opd`, `opsd`). Requires `ref_logprobs` from a [reference scoring](#reference-scoring); the scoring model must be a vLLM server (it's the only one that exposes `prompt_logprobs`).
 
 The orchestrator stamps each sample's component membership as per-token weight streams (`rl_weights` / `ce_weights` / `ref_kl_weights` on the wire): a weight scales that component's per-token loss, `0.0` leaves the token out of the component entirely (mask *and* denominator), and components may overlap on the same token — their gradients sum. Each $N$ is the global (all-reduced) count of that component's member tokens, so the components don't dilute each other: adding echo observation tokens never changes the rl term's effective per-token learning rate, and an sft env packed next to a GRPO env doesn't soften its gradient. Tokens of different components pack freely into the same micro batch, and a plain GRPO run ships no weight streams at all (absent streams mean rl weight 1.0 on every trainable token — the unchanged hot path). Advantages always ship per token (`advantages` on the wire), assigned as per-token streams from the start — uniform group credit is broadcast over completion tokens at assignment; algorithms with no rl credit (opd, opsd) ship none.
@@ -283,7 +283,7 @@ The advantage strategy is the `advantage` component of the [algorithm](#the-algo
 | `reward` | `rl` | Advantage = raw reward, no baseline. |
 | `opd` | `ref_kl` | On-policy distillation: per-token reverse KL to a reference model (`model`, an inline frozen hosted model), evaluated in the trainer from shipped reference logprobs. No credit — rollouts keep `advantages = None` (advantage-based filters never fire) and ship no advantage stream; `group_size` only fans out sampling. |
 | `opsd` | `ref_kl` | SDFT: per-token reverse KL to a demo-conditioned reference. No credit — rollouts keep `advantages = None` (advantage-based filters never fire) and ship no advantage stream. |
-| `sft` | `ce` | Cross-entropy on the sampled tokens. The loss ignores advantages, but group-relative credit is still assigned so reward-based filtering keeps working. |
+| `sft_distill` | `ce` | Cross-entropy on the sampled tokens. The loss ignores advantages, but group-relative credit is still assigned so reward-based filtering keeps working. |
 | `custom` | `rl` | Your function (below); per-token advantages per rollout. |
 
 ### Default Advantage

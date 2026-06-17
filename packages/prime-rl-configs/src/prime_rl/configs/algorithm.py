@@ -96,10 +96,12 @@ class StaticDatasetConfig(BaseConfig):
 SamplingSource: TypeAlias = ModelReference | StaticDatasetConfig
 
 SourceKind: TypeAlias = Literal["policy", "frozen_model", "dataset"]
-"""The three rollout-source kinds, on a liveness ladder: ``"policy"`` (live —
-client, env, sampling logprobs, prefix-cache salting, off-policy aging),
-``"frozen_model"`` (a hosted model — client + env, none of the liveness
-consequences), ``"dataset"`` (local supervised traces — no client, no env)."""
+"""Which kind of source generates an env's train rollouts. ``"policy"`` is the
+live policy (needs a client and env, requests sampling logprobs, prefix caches
+salted per version, rollouts age off-policy as the policy updates).
+``"frozen_model"`` is a hosted model (needs a client and env, but its weights
+never change so its rollouts never go stale). ``"dataset"`` is local supervised
+traces (no client, no env)."""
 
 ActionLossType: TypeAlias = Literal["rl", "ce", "ref_kl"]
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import partial
 from typing import TYPE_CHECKING, Any, Callable
 
-from prime_rl.configs.algorithm import AlgorithmConfig, EchoAdvantageConfig
+from prime_rl.configs.algorithm import AdvantageConfig, EchoAdvantageConfig
 from prime_rl.orchestrator.algo.grpo import GRPOAlgorithm
 from prime_rl.utils.utils import import_object
 
@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     import verifiers as vf
     from renderers.base import Renderer
 
+    from prime_rl.orchestrator.types import RolloutView
     from prime_rl.utils.client import InferencePool
 
 
@@ -53,9 +54,8 @@ class EchoAlgorithm(GRPOAlgorithm):
     mask and its denominator. An optional user filter narrows the selection
     per rollout (e.g. dropping tool-output warnings)."""
 
-    def __init__(self, config: AlgorithmConfig, policy_pool: InferencePool, renderer: Renderer | None):
-        super().__init__(config, policy_pool, renderer)
-        advantage = config.advantage
+    def __init__(self, advantage: AdvantageConfig, policy_pool: InferencePool, renderer: Renderer | None):
+        super().__init__(advantage, policy_pool, renderer)
         assert isinstance(advantage, EchoAdvantageConfig)
         self.role_weights = {
             role: role_config.alpha
@@ -66,23 +66,38 @@ class EchoAlgorithm(GRPOAlgorithm):
         if advantage.filter is not None:
             self.filter_fn = partial(import_object(advantage.filter.import_path), **advantage.filter.kwargs)
 
-    def observation_weights(self, output: vf.RolloutOutput) -> list[list[float]]:
-        """Each step's prompt tokens get their message role's weight; a step's
-        own completion tokens are actions, not observations (0.0). The user
-        filter narrows the selection. ``interleave_rollout`` slices the spans
-        that actually land as observations in the merged samples."""
-        trajectory = output["trajectory"]
-        filter_masks = self._filter_masks(output) if self.filter_fn is not None else None
-        per_step = []
-        for step_idx, step in enumerate(trajectory):
-            tokens = step["tokens"]
-            weights = _prompt_role_weights(tokens, self.role_weights)
-            weights.extend([0.0] * len(tokens["completion_ids"]))
-            if filter_masks is not None:
-                mask = filter_masks[step_idx]
-                weights = [weight if keep else 0.0 for weight, keep in zip(weights, mask)]
-            per_step.append(weights)
-        return per_step
+    async def score_rollout(self, rollout: RolloutView) -> None:
+        # Observation weighting is rollout-local; the group-relative GRPO
+        # baseline is inherited unchanged as ``score_group``.
+        self._weight_observations(rollout)
+
+    def _weight_observations(self, rollout: RolloutView) -> None:
+        """Write each sample's ``ce_weights`` stream for the env-provided
+        observation spans interleaving recorded (``obs_spans``): each token
+        gets its message role's weight, narrowed by the optional user filter.
+        The selected tokens stay outside ``completion_mask``, so ce is the
+        only component that trains them. Step attribution is looked up
+        lazily — only steps whose prompt tokens actually landed as
+        observations are computed; samples where nothing is selected ship no
+        ce stream at all."""
+        trajectory = rollout.raw["trajectory"]
+        filter_masks = self._filter_masks(rollout.raw) if self.filter_fn is not None else None
+        step_weights: dict[int, list[float]] = {}
+        for sample in rollout.samples:
+            if not sample.obs_spans:
+                continue
+            weights = [0.0] * len(sample.completion_ids)
+            for start, step_idx, step_start, length in sample.obs_spans:
+                if step_idx not in step_weights:
+                    prompt_weights = _prompt_role_weights(trajectory[step_idx]["tokens"], self.role_weights)
+                    if filter_masks is not None:
+                        # Masks span the step's prompt+completion; obs spans
+                        # only ever come from the prompt part.
+                        prompt_weights = [w if keep else 0.0 for w, keep in zip(prompt_weights, filter_masks[step_idx])]
+                    step_weights[step_idx] = prompt_weights
+                weights[start : start + length] = step_weights[step_idx][step_start : step_start + length]
+            if any(weights):
+                sample.ce_weights = [0.0] * len(sample.prompt_ids) + weights
 
     def _filter_masks(self, output: vf.RolloutOutput) -> list[list[bool]]:
         """Invoke the user echo filter and validate its shape: one keep-mask

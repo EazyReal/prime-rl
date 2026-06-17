@@ -66,11 +66,14 @@ class TrainingSample(msgspec.Struct, array_like=True, gc=False, omit_defaults=Tr
     # samples without live rl member tokens (the trainer raises otherwise).
     advantages: list[float] | None = None
 
-    # Orchestrator-internal: per-token echo ce weights for env-provided
-    # tokens within ``completion_ids`` (set by ``interleave_rollout`` when the
-    # env's algorithm trains on observations; 0.0 = not selected). Folded into
-    # ``ce_weights`` when stamping loss routing and cleared before transport.
-    completion_obs_weights: list[float] | None = None
+    # Orchestrator-internal, cleared before transport: interleaving's
+    # provenance record for env-provided observation tokens — one
+    # ``[completion_start, step_idx, step_prompt_start, length]`` entry per
+    # span that landed as a later-turn prompt extension, mapping sample
+    # positions back to trajectory-step coordinates. Algorithms that train
+    # on observations (echo) consume it at group time and write the
+    # ``ce_weights`` stream directly.
+    obs_spans: list[list[int]] | None = None
 
 
 class TrainingBatch(msgspec.Struct, array_like=True, gc=False, omit_defaults=True):
@@ -92,6 +95,9 @@ class MicroBatch(msgspec.Struct, array_like=True, gc=False, omit_defaults=True):
     position_ids: list[int]
     temperatures: list[float]  # Per-token temperatures used during generation
     env_names: list[str]
+    # Per-sample token counts within the packed batch (one entry per packed
+    # sample); the loss splits the packed sequence back into samples by these.
+    sequence_lengths: list[int]
     ref_logprobs: list[float] | None = None
     lora_num_tokens: list[int] | None = None
     routed_experts: RoutedExperts | None = None

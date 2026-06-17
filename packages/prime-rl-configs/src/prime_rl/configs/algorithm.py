@@ -461,9 +461,7 @@ class AlgorithmConfig(BaseConfig):
         if isinstance(self.advantage, StaticSFTAdvantageConfig) and not isinstance(
             self.sampling.source, StaticDatasetConfig
         ):
-            raise ValueError(
-                "advantage 'sft_static' needs sampling.source.type='dataset' with a Hugging Face dataset."
-            )
+            raise ValueError("advantage 'sft_static' needs sampling.source.type='dataset' with a Hugging Face dataset.")
         if isinstance(self.advantage, SFTAdvantageConfig) and isinstance(self.sampling.source, StaticDatasetConfig):
             raise ValueError("static dataset sampling uses advantage.type='sft_static', not 'sft'.")
         return self

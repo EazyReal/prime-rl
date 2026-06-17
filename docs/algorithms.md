@@ -133,26 +133,26 @@ advantage = { type = "echo" }   # shorthand: the env assembles its own algorithm
 
 At runtime, each env's resolved config builds two objects: a `Sampler` (`prime_rl.orchestrator.sampler`) from the `sampling` component — the pool rollouts are generated from, and the home of future sampling strategies like replay buffers or branching — and one of the named algorithm classes in `prime_rl.orchestrator.algo` (one module per algorithm: `algo/grpo.py`, `algo/opd.py`, …) from the `advantage` component. Algorithm dispatch is keyed on `advantage.type` — it names the algorithm, and each config class's defaults are its vetted parameterization:
 
-| `advantage.type` | Class | `assign` (group time) | `score` (ship time) |
-|---|---|---|---|
-| `grpo` | `GRPOAlgorithm` | group-norm credit (optional length penalty) | — |
-| `echo` | `EchoAlgorithm` | group-norm credit, plus weighted ce on observation tokens | — |
-| `max_rl` | `MaxRLAlgorithm` | mean-normalized group credit | — |
-| `opd` | `OPDAlgorithm` | — | own-context prefill under the teacher |
-| `opsd` | `OPSDAlgorithm` | — | demo-conditioned prefill under the teacher |
-| `sft` | `SFTDistillAlgorithm` | group-norm credit (feeds filters) | — |
-| `reward` | `RewardAlgorithm` | raw reward | — |
-| `custom` | `CustomAlgorithm` | your function | — |
+| `advantage.type` | Class | hook(s) — stage |
+|---|---|---|
+| `grpo` | `GRPOAlgorithm` | `score_group`: group-norm credit (optional length penalty) |
+| `echo` | `EchoAlgorithm` | `score_rollout`: weighted ce on observation tokens; `score_group`: group-norm credit (inherited) |
+| `max_rl` | `MaxRLAlgorithm` | `score_group`: mean-normalized group credit |
+| `opd` | `OPDAlgorithm` | `score_batch`: own-context prefill under the teacher |
+| `opsd` | `OPSDAlgorithm` | `score_batch`: demo-conditioned prefill under the teacher |
+| `sft` | `SFTDistillAlgorithm` | `score_group`: group-norm credit (feeds filters) |
+| `reward` | `RewardAlgorithm` | `score_rollout`: raw reward |
+| `custom` | `CustomAlgorithm` | `score_group`: your function |
 
-Each class owns its methods outright — reading one top to bottom reads the algorithm. The execution points of the training signal:
+Each class owns its hooks outright — reading one top to bottom reads the algorithm, and everything on the class is an override point. The three hooks are one scope-and-timing ladder — each wider scope is unlocked by a later barrier, so the two axes coincide. Each is handed a `RolloutView` (a writable handle exposing only what is valid at its stage: `raw`, `samples`, `reward`, and `assign_advantages` — never not-yet-assigned credit or pipeline-internal lifecycle fields):
 
-- `assign(rollouts)` — at group finalization, cheap and synchronous; sets the rollouts' per-token advantage streams (uniform group credit broadcasts over completion tokens).
-- `async score(rollouts)` — at batch-ship time; attaches per-token reference data by querying `self.reference_pool` (connected in `setup()` from the algorithm's declared model reference — the live policy pool when the reference is `"policy"`).
-- `observation_weights(output)` — at sample construction; per-token CE weights for env-provided observation tokens, one list per trajectory step. The default (`None`) masks every observation out; `echo` overrides it with role selection (via the renderer's attribution) narrowed by the optional user filter, and interleaving just aligns the returned spans onto the merged samples.
+- `score_rollout(rollout)` — one rollout, **on arrival** (as it's tokenized, before its group is complete): rollout-local credit (`rollout.assign_advantages(...)`, scalar broadcast or per-token) or observation ce weights. No siblings. `reward` writes its raw reward here; `echo` weights observation tokens here, reading interleaving's `obs_spans` provenance (which maps merged completion positions back to trajectory-step coordinates), looking up each source step's role attribution, applying the optional user filter, and writing the `ce_weights` stream.
+- `score_group(group)` — the cohort, **before filtering** (filters read the streams), synchronous: group-relative credit (GRPO/MaxRL baselines). `group` is a list of `RolloutView`.
+- `async score_batch(batch)` — the batch's survivors, **after filtering** (dropped rollouts never cost reference compute), async: the only stage with model access — query the algorithm's reference pool (e.g. `self.teacher_pool`, connected in its `setup()` override via `self.connect(...)` — the live policy pool when the reference is `"policy"`, a freshly connected client pool when frozen) and attach per-token results, or modulate advantages.
 
-These hooks are the stages of one compilation — finalized rollouts in, per-token component weight streams out — and the pipeline drives it through three base-class entry points it never looks inside: `build_samples(rollout)` per arrival (interleaving + observation weighting), `finalize_group(rollouts)` per group (credit + wire stamping), `score(rollouts)` per batch.
+The pipeline drives the hooks through three module-level phase functions it never looks inside: `finalize_rollout(algorithm, rollout)` per arrival, `finalize_group(algorithm, rollouts)` per group (scoring + wire stamping; after this the records are frozen — groups die at stamping), and `finalize_batch(train_envs, rollouts)` per batch. Sample construction (interleaving) is pure pipeline — it records the `obs_spans` provenance for any algorithm that trains on env-provided tokens.
 
-Class-level declarations state what the algorithm needs: which loss component its action tokens feed (`action_loss_type`) and what it calls its reference model (`model_role`, e.g. `"teacher"`). Every class is constructed with the policy pool and the policy's renderer — text → token ids always goes through the renderer, the same path the policy's own prompts take (`opsd` requires one, validated at config time). The pipeline only ever calls the base-class hooks — writing your own algorithm is subclassing `Algorithm` and overriding `assign` and/or `score`. For pure credit assignment, no subclass is needed: `advantage.type = "custom"` imports a plain advantage function (see [Custom Advantage](#custom-advantage)); custom reference scoring means forking one of the named classes. Shared math (group normalization, prefill alignment) lives as plain functions in `prime_rl.orchestrator.algo.advantage`.
+Class-level declarations state what the algorithm needs: which loss component its action tokens feed (`action_loss_type`) and what it calls its reference model (`model_role`, e.g. `"teacher"`). Every class is constructed with its advantage config — the component it interprets; the bundle dissolves at construction — plus the two host-owned resources: the policy pool and the policy's renderer. Text → token ids always goes through the renderer, the same path the policy's own prompts take (`opsd` requires one, validated at config time). The pipeline only ever calls the phase functions — writing your own algorithm is subclassing `Algorithm` and overriding the hooks its signal needs. For pure credit assignment, no subclass is needed: `advantage.type = "custom"` imports a plain advantage function (see [Custom Advantage](#custom-advantage)); custom reference scoring means forking one of the named classes. Shared math (group normalization, prefill alignment) lives as plain functions in `prime_rl.orchestrator.algo.advantage`.
 
 ## Async / Off-Policy Training
 
@@ -305,18 +305,17 @@ type = "tokens"
 
 ### Custom Advantage
 
-Advantages are computed **per group**. You write a function that takes one group of rollouts and returns per-token advantages: one list per rollout, aligned to `inputs.completion_lengths` (that rollout's training-sample completion tokens — for multi-turn envs the merged completion, including interleaved observation tokens). There is no scalar advantage anywhere in the pipeline — uniform group credit goes through `inputs.broadcast(...)`, which spreads one value per rollout over its completion tokens. The orchestrator handles groups of varying size automatically — partial-group training kicks in when some rollouts in a group errored.
+Advantages are computed **per group**. You write a function that takes one group's `RolloutView`s — the same handles the `score_group` hook sees — and returns one value per rollout: a scalar (broadcast over that rollout's completion tokens) or a per-token list aligned to them (for multi-turn envs the merged completion, including interleaved observation tokens). There is no scalar advantage stored anywhere in the pipeline — the scalar is just a convenience the view broadcasts at write time. The orchestrator handles groups of varying size automatically — partial-group training kicks in when some rollouts in a group errored.
 
 ```python
 # my_module.py
 import statistics
-from prime_rl.orchestrator.algo import AdvantageInputs
 
-def normalized_advantage(inputs: AdvantageInputs, eps: float = 1e-8) -> list[list[float]]:
-    rewards = [r["reward"] for r in inputs.rollouts]
+def normalized_advantage(group, eps: float = 1e-8) -> list[float]:
+    rewards = [v.reward for v in group]
     mean = statistics.fmean(rewards)
     std = statistics.pstdev(rewards) if len(rewards) > 1 else 0.0
-    return inputs.broadcast([(r - mean) / (std + eps) for r in rewards])
+    return [(r - mean) / (std + eps) for r in rewards]  # one scalar per rollout
 ```
 
 ```toml
@@ -326,25 +325,25 @@ import_path = "my_module.normalized_advantage"
 kwargs = { eps = 1e-8 }
 ```
 
-`AdvantageInputs.rollouts` is a list of `verifiers.RolloutOutput`, so you have access to the full rollout (turns, tool calls, custom metadata) — not just the reward. Use this for anything reward-shaping-like that needs trajectory context.
+Each `RolloutView` exposes `raw` (the env's untouched `verifiers.RolloutOutput`: turns, tool calls, custom metadata), `samples` (the merged token sequences), and `reward` — so you have the full interleaved rollout, not just the reward. Use this for anything reward-shaping-like that needs trajectory context.
 
-Genuinely per-token credit (process rewards, step-level credit assignment) skips the broadcast and returns shaped lists directly:
+Genuinely per-token credit (process rewards, step-level credit assignment) returns shaped lists instead of scalars:
 
 ```python
-def step_weighted_advantage(inputs: AdvantageInputs) -> list[list[float]]:
-    rewards = [r["reward"] for r in inputs.rollouts]
+def step_weighted_advantage(group) -> list[list[float]]:
+    rewards = [v.reward for v in group]
     baseline = statistics.fmean(rewards)
     return [
-        [(reward - baseline) * w for w in my_token_weights(rollout)]  # one float per completion token
-        for reward, rollout in zip(rewards, inputs.rollouts)
+        [(reward - baseline) * w for w in my_token_weights(view.raw)]  # one float per completion token
+        for reward, view in zip(rewards, group)
     ]
 ```
 
-Each list must match `inputs.completion_lengths` exactly — validated loudly at group finalization. Advantage-based filters and metrics derive from the streams (the zero-advantage filter checks for all-zero streams; logged distributions use per-rollout means). Signals that depend on the live policy's weights (like OPD's reverse KL) cannot be precomputed here; those are reference-scoring algorithms, evaluated in the trainer.
+Each per-token list must match the rollout's completion-token count exactly — validated loudly when the view writes it. Advantage-based filters and metrics derive from the streams (the zero-advantage filter checks for all-zero streams; logged distributions use per-rollout means). Signals that depend on the live policy's weights (like OPD's reverse KL) cannot be precomputed here; those are reference-scoring algorithms, evaluated in the trainer.
 
 ### Reference Scoring
 
-`OPDAlgorithm` / `OPSDAlgorithm` have an async ship-time half (`score`): at batch-ship time they query their teacher (`model`, a [model reference](#model-references)) with bounded concurrency (`max_concurrent`, default 32) and attach per-token reference logprobs to each sample:
+`OPDAlgorithm` / `OPSDAlgorithm` have an async ship-time half (`score_batch`): at batch-ship time they query their teacher (`model`, a [model reference](#model-references)) with bounded concurrency (`max_concurrent`, default 32) and attach per-token reference logprobs to each sample:
 
 - `opd` — score each sample's own context under the reference model via prefill; fills `ref_logprobs` for the `ref_kl` loss component (on-policy distillation). `model = "policy"` is rejected (the KL would be identically zero).
 - `opsd` — SDFT: rebuild the prompt with an expert demonstration woven into the last user message (`template`, with `{question}` / `{demonstration}` placeholders), score the policy's completion under that demo-conditioned context. `model = "policy"` scores under the live policy itself — the SDFT setting, no extra deployment. The demonstration is read from the example's `info[demo_key]`, falling back to a top-level rollout field of the same name (e.g. `answer`); single-step trajectories only.

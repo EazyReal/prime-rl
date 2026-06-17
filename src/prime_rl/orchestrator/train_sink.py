@@ -19,10 +19,12 @@ import uuid
 from collections import defaultdict
 
 from prime_rl.configs.orchestrator import OrchestratorConfig
+from prime_rl.orchestrator.algo import finalize_group, finalize_rollout
 from prime_rl.orchestrator.envs import TrainEnvs
 from prime_rl.orchestrator.filters import RolloutFilter, apply_filters
 from prime_rl.orchestrator.trajectories import (
     backfill_rollout_tokens,
+    interleave_rollout,
     offload_images_to_disk,
 )
 from prime_rl.orchestrator.types import TrainBatch, TrainBatchMetrics, TrainRollout
@@ -145,7 +147,7 @@ class TrainSink:
             self.errors_by_env[env_name] += 1
         self.pending_groups[rollout.group_id].append(rollout)
         if len(self.pending_groups[rollout.group_id]) >= self.group_size_for(env_name):
-            self.process_group(rollout.group_id)
+            await self.process_group(rollout.group_id)
         ready = (
             len(self.pending_batch) >= self.batch_size
             if self.batch_size is not None
@@ -169,22 +171,27 @@ class TrainSink:
         needs_backfill = any(s["tokens"] is None for s in raw.get("trajectory") or [])
         if needs_backfill:
             await asyncio.to_thread(backfill_rollout_tokens, raw, self.tokenizer, renderer=self.renderer)
-        algorithm = self.train_envs.get(rollout.env_name).algorithm
         samples = await asyncio.to_thread(
-            lambda: algorithm.build_samples(
+            lambda: interleave_rollout(
                 raw,
                 env_name=rollout.env_name,
                 mm_token_type_ids_mapping=self.mm_token_type_ids_mapping,
             )
         )
         rollout.samples = samples or []
+        # Static/message-only rollouts carry no real token counts; recover them
+        # from the finalized samples so token batching and metrics work.
         raw["token_usage"] = _token_usage_from_samples(rollout.samples)
+        # Arrival phase: rollout-local scoring (raw reward, echo observation
+        # weighting) runs as soon as the rollout is tokenized — before its
+        # group is complete.
+        await finalize_rollout(self.train_envs.get(rollout.env_name).algorithm, rollout)
         # Offload base64 image bytes to disk as soon as the rollout is
         # tokenized, so memory stays flat instead of holding every buffered
         # rollout's images until the batch ships (no-op for text-only).
         await asyncio.to_thread(offload_images_to_disk, [raw], self.config.output_dir)
 
-    def process_group(self, group_id: uuid.UUID) -> None:
+    async def process_group(self, group_id: uuid.UUID) -> None:
         """Finalize one GRPO group: drop errored rollouts (the whole group
         when ``requires_group_scoring`` and any failed), assign advantages,
         run pre-batch filters, append survivors to ``pending_batch``."""
@@ -215,7 +222,7 @@ class TrainSink:
         # Advantages + per-sample wire stamping (advantage stream, loss
         # routing) are the algorithm's job; the sink only owns the grouping
         # mechanics.
-        env.algorithm.finalize_group(survivors)
+        await finalize_group(env.algorithm, survivors)
 
         # The env has a single sampling temperature; fan it out across each
         # sample's completion tokens (interleave leaves it empty).

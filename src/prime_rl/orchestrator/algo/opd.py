@@ -4,14 +4,14 @@ import asyncio
 from itertools import cycle
 from typing import TYPE_CHECKING
 
-from prime_rl.configs.algorithm import AlgorithmConfig, OPDAdvantageConfig
+from prime_rl.configs.algorithm import AdvantageConfig, OPDAdvantageConfig
 from prime_rl.orchestrator.algo.base import Algorithm
 from prime_rl.orchestrator.utils import compute_prefill_logprobs
 
 if TYPE_CHECKING:
     from renderers.base import Renderer
 
-    from prime_rl.orchestrator.types import TrainRollout
+    from prime_rl.orchestrator.types import RolloutView
     from prime_rl.transport import TrainingSample
     from prime_rl.utils.client import InferencePool
 
@@ -30,15 +30,21 @@ class OPDAlgorithm(Algorithm):
     action_loss_type = "ref_kl"
     model_role = "teacher"
 
-    def __init__(self, config: AlgorithmConfig, policy_pool: InferencePool, renderer: Renderer | None):
-        super().__init__(config, policy_pool, renderer)
-        assert isinstance(config.advantage, OPDAdvantageConfig)
-        self.max_concurrent = config.advantage.max_concurrent
+    def __init__(self, advantage: AdvantageConfig, policy_pool: InferencePool, renderer: Renderer | None):
+        super().__init__(advantage, policy_pool, renderer)
+        assert isinstance(advantage, OPDAdvantageConfig)
+        self.max_concurrent = advantage.max_concurrent
+        self.teacher = advantage.model
+        self.teacher_pool: InferencePool | None = None  # connected in setup()
 
-    async def score(self, rollouts: list[TrainRollout]) -> None:
-        pool = self._reference_pool()
+    async def setup(self) -> None:
+        self.teacher_pool = await self.connect(self.teacher)
+
+    async def score_batch(self, batch: list[RolloutView]) -> None:
+        pool = self.teacher_pool
+        assert pool is not None, "teacher pool not connected — Algorithm.setup() must run first"
         semaphore = asyncio.Semaphore(self.max_concurrent)
-        samples = [sample for rollout in rollouts for sample in rollout.samples]
+        samples = [sample for view in batch for sample in view.samples]
 
         async def score_sample(client, sample: TrainingSample) -> None:
             async with semaphore:

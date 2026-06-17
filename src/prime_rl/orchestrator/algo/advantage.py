@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 import torch
-import verifiers as vf
 from jaxtyping import Float
 from torch import Tensor
 
 if TYPE_CHECKING:
-    from prime_rl.orchestrator.types import TrainRollout
+    from prime_rl.orchestrator.types import RolloutView
 
 from prime_rl.configs.algorithm import (
     LengthPenaltyConfig,
@@ -18,65 +16,48 @@ from prime_rl.configs.algorithm import (
 )
 from prime_rl.orchestrator.utils import get_model_completion_len, get_tool_response_len
 
-
-@dataclass
-class AdvantageInputs:
-    """Inputs for advantage computation of a single group (one example × N rollouts)."""
-
-    rollouts: list[vf.RolloutOutput]
-    completion_lengths: list[int]
-    """Per rollout: its training samples' total completion-token count
-    (including any interleaved env-observation tokens) — the length of the
-    advantage list to return for it."""
-
-    def broadcast(self, values: list[float]) -> list[list[float]]:
-        """Spread one value per rollout over that rollout's completion tokens —
-        scalar group credit (e.g. reward minus baseline) becomes a uniform
-        per-token stream."""
-        return [[float(v)] * n for v, n in zip(values, self.completion_lengths, strict=True)]
-
-
-AdvantageFn = Callable[..., list[list[float]]]
+AdvantageFn = Callable[..., list[float | list[float]]]
 """Type for an advantage function.
 
 Expected signature:
-    def my_advantage(inputs: AdvantageInputs, **kwargs) -> list[list[float]]:
+    def my_advantage(group: list[RolloutView], **kwargs) -> list[float | list[float]]:
         ...
 
-The function receives a single group and returns per-token advantages: one
-list per rollout, aligned to ``inputs.completion_lengths``. There is no scalar
-advantage anywhere — uniform group credit goes through ``inputs.broadcast``.
-`assign_advantages` calls the function on one already-grouped cohort.
+The function receives one finalized group — the same ``RolloutView``\\ s the
+``score_group`` hook sees (``raw`` in step coordinates, ``samples`` in merged
+token coordinates) — and returns one value per rollout: a scalar (broadcast
+over the rollout's completion tokens) or a per-token list aligned to them.
+`apply_advantage_fn` writes each through ``RolloutView.assign_advantages``.
 """
 
 
 def default_advantage_fn(
-    inputs: AdvantageInputs,
+    group: list["RolloutView"],
     length_penalty: LengthPenaltyConfig | None = None,
-) -> list[list[float]]:
+) -> list[float]:
     """Default GRPO advantage for a single group: reward minus per-group baseline.
 
     `length_penalty` enables correctness-gated efficiency shaping over a per-rollout
     cost: tokens (weighted completion + tool-response) or trajectory turn count.
     """
-    rewards = torch.tensor([r["reward"] for r in inputs.rollouts], dtype=torch.float32)
+    rewards = torch.tensor([v.reward for v in group], dtype=torch.float32)
 
     if isinstance(length_penalty, TokensLengthPenaltyConfig):
         w_c = length_penalty.completion_weight
         w_t = length_penalty.tool_response_weight
         costs = torch.tensor(
-            [w_c * get_model_completion_len(r) + w_t * get_tool_response_len(r) for r in inputs.rollouts],
+            [w_c * get_model_completion_len(v.raw) + w_t * get_tool_response_len(v.raw) for v in group],
             dtype=rewards.dtype,
         )
-        return inputs.broadcast(_efficiency_shaping(rewards, costs).tolist())
+        return _efficiency_shaping(rewards, costs).tolist()
     if isinstance(length_penalty, TurnsLengthPenaltyConfig):
-        costs = torch.tensor([len(r["trajectory"]) for r in inputs.rollouts], dtype=rewards.dtype)
-        return inputs.broadcast(_efficiency_shaping(rewards, costs).tolist())
+        costs = torch.tensor([len(v.raw["trajectory"]) for v in group], dtype=rewards.dtype)
+        return _efficiency_shaping(rewards, costs).tolist()
 
-    return inputs.broadcast((rewards - rewards.mean()).tolist())
+    return (rewards - rewards.mean()).tolist()
 
 
-def max_rl_advantage_fn(inputs: AdvantageInputs) -> list[list[float]]:
+def max_rl_advantage_fn(group: list["RolloutView"]) -> list[float]:
     """MaxRL advantage for a single group (arXiv:2602.02710): reward minus the
     per-group mean, divided by that mean — equivalent to averaging score
     functions over successful rollouts only, which makes the policy gradient
@@ -85,11 +66,11 @@ def max_rl_advantage_fn(inputs: AdvantageInputs) -> list[list[float]]:
     rewards; a group with mean reward <= 0 carries no signal and gets zero
     advantages (the zero-advantage filter drops it, matching the paper's
     no-success convention)."""
-    rewards = torch.tensor([r["reward"] for r in inputs.rollouts], dtype=torch.float32)
+    rewards = torch.tensor([v.reward for v in group], dtype=torch.float32)
     mean = rewards.mean()
     if mean <= 0:
-        return inputs.broadcast(torch.zeros_like(rewards).tolist())
-    return inputs.broadcast(((rewards - mean) / mean).tolist())
+        return torch.zeros_like(rewards).tolist()
+    return ((rewards - mean) / mean).tolist()
 
 
 def _efficiency_shaping(
@@ -129,27 +110,16 @@ def _efficiency_shaping(
     return shaped_rewards - shaped_rewards.mean()
 
 
-def assign_advantages(
-    rollouts: list["TrainRollout"],  # noqa: F821 (forward ref)
-    advantage_fn: AdvantageFn | None,
-) -> None:
-    """Compute and assign per-token advantages for one finished group of
-    rollouts (the algorithm's ``assign`` hands in one finalized group's
-    survivors). ``advantage_fn=None`` is the trivial case (advantage = reward,
-    broadcast); a custom ``advantage_fn`` receives the raw
-    ``vf.RolloutOutput``\\ s and per-rollout completion lengths via
-    ``AdvantageInputs``.
-    """
-    inputs = AdvantageInputs(
-        rollouts=[r.raw for r in rollouts],
-        completion_lengths=[sum(len(s.completion_ids) for s in r.samples) for r in rollouts],
-    )
-    advantages = inputs.broadcast([r.reward for r in rollouts]) if advantage_fn is None else advantage_fn(inputs)
-    for rollout, advs in zip(rollouts, advantages, strict=True):
-        rollout.advantages = advs
+def apply_advantage_fn(group: list["RolloutView"], advantage_fn: AdvantageFn) -> None:
+    """Run an advantage function over one finished group and write each
+    rollout's result through :meth:`RolloutView.assign_advantages` (scalar
+    broadcast or per-token list). The group-relative algorithms' ``score_group``
+    hook delegates here."""
+    for view, advs in zip(group, advantage_fn(group), strict=True):
+        view.assign_advantages(advs)
 
 
-def assign_group_norm(rollouts: list["TrainRollout"], length_penalty: LengthPenaltyConfig | None) -> None:
+def assign_group_norm(group: list["RolloutView"], length_penalty: LengthPenaltyConfig | None) -> None:
     """Group-norm credit (the GRPO default), optionally length-shaped — shared
-    by the algorithms whose ``assign`` is plain group normalization."""
-    assign_advantages(rollouts, lambda inputs: default_advantage_fn(inputs, length_penalty=length_penalty))
+    by the algorithms whose ``score_group`` is plain group normalization."""
+    apply_advantage_fn(group, lambda g: default_advantage_fn(g, length_penalty=length_penalty))

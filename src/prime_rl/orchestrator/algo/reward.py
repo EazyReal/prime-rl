@@ -2,16 +2,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from prime_rl.orchestrator.algo.advantage import assign_advantages
 from prime_rl.orchestrator.algo.base import Algorithm
 
 if TYPE_CHECKING:
-    from prime_rl.orchestrator.types import TrainRollout
+    from prime_rl.orchestrator.types import RolloutView
 
 
 class RewardAlgorithm(Algorithm):
-    """REINFORCE-style: credit = raw reward, no group baseline; action tokens
-    feed the ``rl`` loss."""
+    """REINFORCE-style: credit = raw reward, no group baseline. Purely
+    rollout-local — no siblings needed — so it scores on arrival; action
+    tokens feed the ``rl`` loss."""
 
-    def assign(self, rollouts: list[TrainRollout]) -> None:
-        assign_advantages(rollouts, None)
+    async def score_rollout(self, rollout: RolloutView) -> None:
+        rollout.assign_advantages(rollout.reward)

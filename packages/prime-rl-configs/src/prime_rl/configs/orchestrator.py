@@ -11,7 +11,6 @@ from renderers import AutoRendererConfig, RendererConfig
 from prime_rl.configs.algorithm import (
     AdvantageConfig,
     AlgorithmConfig,
-    StaticDatasetConfig,
 )
 from prime_rl.configs.shared import (
     BaseModelConfig,
@@ -737,25 +736,6 @@ class OrchestratorConfig(BaseConfig):
         """True when at least one train env samples rollouts from the live policy."""
         return any(env.algo is not None and env.algo.sampling.source == "policy" for env in self.train.env)
 
-    @property
-    def any_static_dataset_sourced(self) -> bool:
-        """True when at least one train env loads supervised traces locally."""
-        return any(
-            env.algo is not None and isinstance(env.algo.sampling.source, StaticDatasetConfig)
-            for env in self.train.env
-        )
-
-    @model_validator(mode="after")
-    def _force_no_renderer_without_policy_sampling(self):
-        """Frozen-sourced rollouts go through the frozen model's plain
-        chat-completions endpoint; the renderer client doesn't apply. When no
-        train env samples from the policy, force ``renderer=None`` so the user
-        doesn't have to remember to set it. Declared before the renderer
-        validators below so they see the corrected value."""
-        if not self.any_policy_sourced and not self.any_static_dataset_sourced:
-            self.renderer = None
-        return self
-
     @model_validator(mode="after")
     def validate_renderer_for_demo_scoring(self):
         """``opsd`` rebuilds its demo-conditioned scoring prefix
@@ -768,8 +748,7 @@ class OrchestratorConfig(BaseConfig):
                 raise ValueError(
                     f"env '{env.resolved_name}' uses opsd, which renders its demo-conditioned "
                     "scoring prefix client-side and requires orchestrator.renderer — remove "
-                    "'renderer = \"None\"' (and note the renderer is forced off when no train env "
-                    "samples from the policy)."
+                    "'renderer = \"None\"'."
                 )
             if env.algo is not None and env.algo.advantage.type == "echo":
                 raise ValueError(
@@ -780,14 +759,23 @@ class OrchestratorConfig(BaseConfig):
 
     @model_validator(mode="after")
     def validate_pool_size(self):
-        """``pool_size`` is only meaningful when the renderer is enabled
-        (``renderer is not None``). Reject otherwise so callers don't
-        silently pass it and wonder why it's ignored."""
-        if self.renderer is None and self.pool_size is not None:
+        """``pool_size`` sizes the renderer-client pool for policy-sourced
+        sampling. Reject it when that path never runs — no renderer, or no
+        train env samples from the policy — so callers don't silently pass
+        it and wonder why it's ignored."""
+        if self.pool_size is None:
+            return self
+        if self.renderer is None:
             raise ValueError(
                 f"orchestrator.pool_size={self.pool_size!r} is set but "
                 "orchestrator.renderer is None (MITO mode). Either configure a renderer "
                 "or remove pool_size."
+            )
+        if not self.any_policy_sourced:
+            raise ValueError(
+                f"orchestrator.pool_size={self.pool_size!r} is set but no train env samples "
+                "from the policy — the renderer-client sampling pool never runs (the renderer "
+                "is still used for client-side tokenization). Remove pool_size."
             )
         return self
 

@@ -316,11 +316,12 @@ class SFTAdvantageConfig(BaseConfig):
     supervision target."""
 
     action_loss_type: ClassVar[ActionLossType] = "ce"
-    source_role: ClassVar[str] = "teacher"
-    """The sampling source supplies the supervised tokens: a frozen ``teacher``
-    model or a static dataset — never the policy itself (rejected at
-    validation). ``teacher`` is the model-shorthand alias for the frozen-model
-    case."""
+    reference_is_sampling_source: ClassVar[bool] = True
+    """The supervised tokens come from the sampling source itself — a frozen
+    ``teacher`` model (the ``teacher`` shorthand folds into ``sampling.source``)
+    or a static ``dataset`` — never the policy (rejected at validation). Unlike
+    ``model_role`` (opd / opsd), where the reference is a separate
+    ``advantage.model`` and is always a model."""
 
 
 class CustomAdvantageConfig(BaseConfig):
@@ -378,12 +379,12 @@ class AlgorithmConfig(BaseConfig):
     """Model reference shorthand: ``"policy"`` or an inline frozen hosted
     model. Folds into the slot the advantage type declares for it —
     ``advantage.model`` when the type has one (opd, opsd), ``sampling.source``
-    when the type's teacher is its sampling source (sft). A slot the user
+    when the type's reference is its sampling source (sft). A slot the user
     didn't set takes the shorthand; an explicit reference that already equals
     it is accepted, a disagreeing one is an error. ``teacher`` is an accepted
-    alias — the distillation algorithms declare their reference's role as
-    "teacher", and this is the slot it fills. Write-only input sugar — folded
-    by validation and excluded from dumps so resolved configs round-trip."""
+    alias for this shorthand — the frozen-model reference is a teacher — and it
+    fills whichever slot the type declares. Write-only input sugar — folded by
+    validation and excluded from dumps so resolved configs round-trip."""
 
     sampling: SamplingConfig = SamplingConfig()
     """Sampling component."""
@@ -418,7 +419,7 @@ class AlgorithmConfig(BaseConfig):
                 matched = True
             elif advantage.model == self.model:
                 matched = True
-        if getattr(advantage, "source_role", None) is not None:
+        if getattr(advantage, "reference_is_sampling_source", False):
             if "source" not in self.sampling.model_fields_set:
                 self.sampling.source = self.model
                 matched = True
@@ -434,12 +435,11 @@ class AlgorithmConfig(BaseConfig):
 
     @model_validator(mode="after")
     def validate_component_compatibility(self):
-        source_role = getattr(self.advantage, "source_role", None)
-        if source_role is not None and self.sampling.source == "policy":
+        if getattr(self.advantage, "reference_is_sampling_source", False) and self.sampling.source == "policy":
             raise ValueError(
                 f"advantage '{self.advantage.type}' needs a non-policy source for its supervised "
-                "tokens — CE on the policy's own tokens is not a supervision target. Set a "
-                f"'{source_role}' (an inline hosted model: name + base_url) or a dataset "
+                "tokens — CE on the policy's own tokens is not a supervision target. Set either a "
+                "frozen teacher model (the 'teacher' shorthand: name + base_url) or a dataset "
                 "(sampling.source.type='dataset')."
             )
         if getattr(self.advantage, "model", "<absent>") is None:

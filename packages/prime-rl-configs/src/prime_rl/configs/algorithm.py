@@ -316,12 +316,6 @@ class SFTAdvantageConfig(BaseConfig):
     supervision target."""
 
     action_loss_type: ClassVar[ActionLossType] = "ce"
-    reference_is_sampling_source: ClassVar[bool] = True
-    """The supervised tokens come from the sampling source itself — a frozen
-    ``teacher`` model (the ``teacher`` shorthand folds into ``sampling.source``)
-    or a static ``dataset`` — never the policy (rejected at validation). Unlike
-    ``model_role`` (opd / opsd), where the reference is a separate
-    ``advantage.model`` and is always a model."""
 
 
 class CustomAdvantageConfig(BaseConfig):
@@ -419,7 +413,9 @@ class AlgorithmConfig(BaseConfig):
                 matched = True
             elif advantage.model == self.model:
                 matched = True
-        if getattr(advantage, "reference_is_sampling_source", False):
+        # sft's supervised tokens come from its sampling source, so the teacher
+        # shorthand folds there (sft has no advantage.model).
+        if isinstance(advantage, SFTAdvantageConfig):
             if "source" not in self.sampling.model_fields_set:
                 self.sampling.source = self.model
                 matched = True
@@ -435,12 +431,11 @@ class AlgorithmConfig(BaseConfig):
 
     @model_validator(mode="after")
     def validate_component_compatibility(self):
-        if getattr(self.advantage, "reference_is_sampling_source", False) and self.sampling.source == "policy":
+        if isinstance(self.advantage, SFTAdvantageConfig) and self.sampling.source == "policy":
             raise ValueError(
-                f"advantage '{self.advantage.type}' needs a non-policy source for its supervised "
-                "tokens — CE on the policy's own tokens is not a supervision target. Set either a "
-                "frozen teacher model (the 'teacher' shorthand: name + base_url) or a dataset "
-                "(sampling.source.type='dataset')."
+                "advantage 'sft' needs a non-policy source for its supervised tokens — CE on the "
+                "policy's own tokens is not a supervision target. Set either a frozen teacher model "
+                "(the 'teacher' shorthand: name + base_url) or a dataset (sampling.source.type='dataset')."
             )
         if getattr(self.advantage, "model", "<absent>") is None:
             role = getattr(self.advantage, "model_role", "reference model")

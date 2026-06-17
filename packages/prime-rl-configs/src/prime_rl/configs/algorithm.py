@@ -105,9 +105,12 @@ ActionLossType: TypeAlias = Literal["rl", "ce", "ref_kl"]
 
 class SamplingConfig(BaseConfig):
     source: SamplingSource = "policy"
-    """Train rollout source: ``"policy"`` (live policy), an inline frozen
-    hosted model (hard distillation), or a static Hugging Face dataset of
-    supervised messages (static SFT)."""
+    """Train rollout source: ``"policy"`` (the live policy — prefix caches
+    salted per version, sampling logprobs requested, rollouts age off-policy),
+    an inline frozen hosted model (stable prefix cache, no sampling logprobs,
+    rollouts never go stale — hard distillation), or a static Hugging Face
+    dataset of supervised messages (no client, env, sampling logprobs, or
+    staleness — static SFT)."""
 
 
 # ---------------------------------------------------------------------------

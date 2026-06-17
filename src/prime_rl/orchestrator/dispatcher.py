@@ -175,7 +175,7 @@ class RolloutDispatcher:
         """``(pool, model_name, is_live)`` for *train* rollouts of this env —
         the env sampler's pool. (Eval always uses the policy.)"""
         sampler = self.train_envs.get(env_name).sampler
-        if sampler.samples_from_live_policy:
+        if sampler.source_kind == "policy":
             return sampler.pool, self.policy.model_name, True
         return sampler.pool, sampler.pool.model_name, False
 
@@ -270,7 +270,7 @@ class RolloutDispatcher:
                 continue
             # Frozen-sourced rollouts never go stale — their sampler doesn't
             # change with policy updates.
-            if not self.train_envs.get(meta.env_name).sampler.samples_from_live_policy:
+            if self.train_envs.get(meta.env_name).sampler.source_kind != "policy":
                 continue
             meta.off_policy_steps += 1
             if meta.off_policy_steps > self.max_off_policy_steps:
@@ -391,7 +391,7 @@ class RolloutDispatcher:
             return False
         env = env_collection.get(group.env_name)
 
-        if group.kind == "train" and env.sampler.samples_from_static_dataset:
+        if group.kind == "train" and env.sampler.source_kind == "dataset":
             permits = 1
             group.rollouts_to_schedule -= 1
             await self.acquire(permits)

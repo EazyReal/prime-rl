@@ -165,7 +165,7 @@ class TrainEnv(Env):
     config: TrainEnvConfig
 
     def __init__(self, config: TrainEnvConfig, sampler: Sampler, algorithm: Algorithm):
-        if not sampler.samples_from_static_dataset:
+        if sampler.source_kind != "dataset":
             super().__init__(config)
         else:
             self.config = config
@@ -179,7 +179,7 @@ class TrainEnv(Env):
 
     @property
     def requires_group_scoring(self) -> bool:
-        if self.sampler.samples_from_static_dataset:
+        if self.sampler.source_kind == "dataset":
             return False
         return super().requires_group_scoring
 
@@ -189,12 +189,12 @@ class TrainEnv(Env):
         log_level: str | None = None,
         json_logging: bool = False,
     ) -> None:
-        if self.sampler.samples_from_static_dataset:
+        if self.sampler.source_kind == "dataset":
             return
         await super().start(log_dir=log_dir, log_level=log_level, json_logging=json_logging)
 
     def get_dataset(self, seed: int | None = None):
-        if self.sampler.samples_from_static_dataset:
+        if self.sampler.source_kind == "dataset":
             return load_static_sft_rows(self.sampler.static_dataset, seed=seed)
         return self.env.get_dataset(seed=seed)
 

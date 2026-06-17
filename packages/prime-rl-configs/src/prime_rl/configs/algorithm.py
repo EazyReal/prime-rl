@@ -95,6 +95,12 @@ class StaticDatasetConfig(BaseConfig):
 
 SamplingSource: TypeAlias = ModelReference | StaticDatasetConfig
 
+SourceKind: TypeAlias = Literal["policy", "frozen_model", "dataset"]
+"""The three rollout-source kinds, on a liveness ladder: ``"policy"`` (live —
+client, env, sampling logprobs, prefix-cache salting, off-policy aging),
+``"frozen_model"`` (a hosted model — client + env, none of the liveness
+consequences), ``"dataset"`` (local supervised traces — no client, no env)."""
+
 ActionLossType: TypeAlias = Literal["rl", "ce", "ref_kl"]
 
 

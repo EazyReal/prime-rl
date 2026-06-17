@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from prime_rl.configs.algorithm import FrozenModelConfig, SamplingConfig, StaticDatasetConfig
+from prime_rl.configs.algorithm import FrozenModelConfig, SamplingConfig, SourceKind, StaticDatasetConfig
 from prime_rl.orchestrator.algo import connect_frozen_pool
 
 if TYPE_CHECKING:
@@ -40,12 +40,15 @@ class Sampler:
             self.connected_pools.append(self.pool)
 
     @property
-    def samples_from_live_policy(self) -> bool:
-        return self.config.source == "policy"
-
-    @property
-    def samples_from_static_dataset(self) -> bool:
-        return isinstance(self.config.source, StaticDatasetConfig)
+    def source_kind(self) -> SourceKind:
+        """Which kind of source generates this env's train rollouts — the one
+        axis dispatch, env lifecycle, and sampling args all branch on."""
+        source = self.config.source
+        if source == "policy":
+            return "policy"
+        if isinstance(source, StaticDatasetConfig):
+            return "dataset"
+        return "frozen_model"
 
     @property
     def static_dataset(self) -> StaticDatasetConfig:
@@ -56,6 +59,6 @@ class Sampler:
         """Source-specific sampling-arg overrides. Sampling logprobs are only
         needed for importance ratios on policy-sampled tokens — frozen
         endpoints may reject the knob."""
-        if not self.samples_from_live_policy:
+        if self.source_kind != "policy":
             args.pop("logprobs", None)
         return args

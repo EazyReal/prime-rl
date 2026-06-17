@@ -607,7 +607,7 @@ class RLConfig(BaseConfig):
         """Auto-configure the orchestrator policy client from the inference server config.
 
         Always sets dp_rank_count from inference DP size. When no train env
-        samples from the policy (e.g. sft_distill), also sets base_url —
+        samples from the policy (e.g. sft from a frozen teacher), also sets base_url —
         policy-sourced algorithms rely on the ClientConfig default
         (``["http://localhost:8000/v1"]``) which already matches the auto-launched
         policy vLLM at inference.server.port = 8000.

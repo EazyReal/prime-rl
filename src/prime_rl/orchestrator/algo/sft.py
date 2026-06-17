@@ -1,30 +1,14 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-from prime_rl.orchestrator.algo.advantage import assign_group_norm
 from prime_rl.orchestrator.algo.base import Algorithm
 
-if TYPE_CHECKING:
-    from prime_rl.orchestrator.types import RolloutView
 
+class SFTAlgorithm(Algorithm):
+    """Supervised fine-tuning: cross-entropy on the source's target tokens.
 
-class SFTDistillAlgorithm(Algorithm):
-    """Hard distillation. Needs a teacher: the frozen model that generates the
-    rollouts (``sampling.source``); the policy trains with CE on its tokens.
-
-    The ``ce`` loss ignores credit, but group-relative advantages are still
-    assigned so reward-based filtering keeps working."""
-
-    action_loss_type = "ce"
-
-    async def score_group(self, group: list[RolloutView]) -> None:
-        assign_group_norm(group, None)
-
-
-class StaticSFTAlgorithm(Algorithm):
-    """Static supervised fine-tuning from dataset-provided assistant messages.
-
-    No scalar credit is assigned; action tokens are routed directly to CE."""
+    Assigns no credit — the target tokens themselves are the supervision, so
+    the algorithm only routes action tokens to the ``ce`` loss and overrides no
+    scoring hook. Where the targets come from (a frozen teacher model's fresh
+    rollouts, or a static dataset's stored traces) is the Sampler's concern."""
 
     action_loss_type = "ce"

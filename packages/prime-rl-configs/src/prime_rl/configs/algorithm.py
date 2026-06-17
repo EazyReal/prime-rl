@@ -304,30 +304,23 @@ class OPSDAdvantageConfig(BaseConfig):
     """Maximum concurrent prefill requests per batch."""
 
 
-class SFTDistillAdvantageConfig(BaseConfig):
-    type: Literal["sft_distill"] = "sft_distill"
-    """SFT distillation: cross-entropy on a teacher's sampled tokens. The ``ce``
-    loss component ignores scalar advantages, but group-relative scalars are still
-    assigned so reward-based filtering keeps working (the zero-advantage
-    filter drops uniform-reward groups)."""
+class SFTAdvantageConfig(BaseConfig):
+    type: Literal["sft"] = "sft"
+    """Supervised fine-tuning: cross-entropy on the sampled target tokens. No
+    credit is assigned — the target tokens themselves are the supervision. The
+    source supplies the targets and decides the flavor: a frozen hosted model
+    (``sampling.source`` a frozen model, or the ``teacher`` shorthand) is
+    distillation on freshly sampled teacher tokens; a static dataset
+    (``sampling.source.type = "dataset"``) is replay of stored supervised
+    traces. The policy's own samples are rejected — CE on them is not a
+    supervision target."""
 
     action_loss_type: ClassVar[ActionLossType] = "ce"
-    group_relative: ClassVar[bool] = True
     source_role: ClassVar[str] = "teacher"
-    """The sampling source is this algorithm's teacher — the frozen model
-    whose tokens the policy trains on. Required: CE on the policy's own
-    tokens is rejected at validation."""
-
-
-class StaticSFTAdvantageConfig(BaseConfig):
-    type: Literal["sft_static"] = "sft_static"
-    """Static SFT: cross-entropy on assistant messages loaded from a dataset.
-
-    No reward or group-relative scalar is assigned; the dataset row itself is
-    the supervised target, and advantage-based filters skip it."""
-
-    action_loss_type: ClassVar[ActionLossType] = "ce"
-    group_relative: ClassVar[bool] = False
+    """The sampling source supplies the supervised tokens: a frozen ``teacher``
+    model or a static dataset — never the policy itself (rejected at
+    validation). ``teacher`` is the model-shorthand alias for the frozen-model
+    case."""
 
 
 class CustomAdvantageConfig(BaseConfig):
@@ -353,8 +346,7 @@ AdvantageConfig: TypeAlias = Annotated[
     | RewardAdvantageConfig
     | OPDAdvantageConfig
     | OPSDAdvantageConfig
-    | SFTDistillAdvantageConfig
-    | StaticSFTAdvantageConfig
+    | SFTAdvantageConfig
     | CustomAdvantageConfig,
     Field(discriminator="type"),
 ]
@@ -377,8 +369,7 @@ class AlgorithmConfig(BaseConfig):
     - ``max_rl`` — GRPO with mean-normalized advantages (maximum-likelihood RL).
     - ``opd`` — on-policy distillation: policy samples, per-token reverse KL against a reference model. Needs ``teacher``.
     - ``opsd`` — SDFT: policy samples, demo-conditioned reverse KL against the live policy by default.
-    - ``sft_distill`` — a frozen model samples, the policy trains with CE on its tokens. Needs ``teacher``.
-    - ``sft_static`` — a static HF dataset provides assistant messages, the policy trains with CE.
+    - ``sft`` — CE on supervised target tokens from a non-policy source: a frozen ``teacher`` model (distillation) or a static HF ``dataset`` (replay of stored traces).
     - ``echo`` — GRPO on action tokens + weighted CE on tool-response observation tokens.
     - ``reward`` / ``custom`` — raw-reward and user-supplied advantage functions.
     """
@@ -404,8 +395,9 @@ class AlgorithmConfig(BaseConfig):
     @property
     def requires_group_advantage(self) -> bool:
         """True when the advantage strategy assigns group-relative scalars,
-        i.e. degenerate with ``group_size=1``."""
-        return self.advantage.group_relative
+        i.e. degenerate with ``group_size=1``. Advantages that don't declare
+        ``group_relative`` (e.g. ``sft``) are not group-relative."""
+        return getattr(self.advantage, "group_relative", False)
 
     @model_validator(mode="after")
     def fold_model(self):
@@ -445,9 +437,10 @@ class AlgorithmConfig(BaseConfig):
         source_role = getattr(self.advantage, "source_role", None)
         if source_role is not None and self.sampling.source == "policy":
             raise ValueError(
-                f"advantage '{self.advantage.type}' needs a {source_role} to sample rollouts from — "
-                f"CE on the policy's own tokens is not a distillation target. Set '{source_role}' on "
-                "the algorithm (an inline hosted model: name + base_url), or sampling.source explicitly."
+                f"advantage '{self.advantage.type}' needs a non-policy source for its supervised "
+                "tokens — CE on the policy's own tokens is not a supervision target. Set a "
+                f"'{source_role}' (an inline hosted model: name + base_url) or a dataset "
+                "(sampling.source.type='dataset')."
             )
         if getattr(self.advantage, "model", "<absent>") is None:
             role = getattr(self.advantage, "model_role", "reference model")
@@ -465,18 +458,10 @@ class AlgorithmConfig(BaseConfig):
         if self.advantage.action_loss_type in ("rl", "ref_kl") and self.sampling.source != "policy":
             raise ValueError(
                 f"advantage '{self.advantage.type}' trains with the "
-                f"{self.advantage.action_loss_type} loss type but sampling.source is a frozen model — "
+                f"{self.advantage.action_loss_type} loss type but sampling.source is not the policy — "
                 "the importance ratio and trust region need the live policy's own sampling logprobs. "
-                "Use the 'sft_distill' advantage to distill frozen-model tokens."
+                "Use the 'sft' advantage to train on a frozen model's or dataset's tokens."
             )
-        if isinstance(self.advantage, StaticSFTAdvantageConfig) and not isinstance(
-            self.sampling.source, StaticDatasetConfig
-        ):
-            raise ValueError("advantage 'sft_static' needs sampling.source.type='dataset' with a Hugging Face dataset.")
-        if isinstance(self.advantage, SFTDistillAdvantageConfig) and isinstance(
-            self.sampling.source, StaticDatasetConfig
-        ):
-            raise ValueError("static dataset sampling uses advantage.type='sft_static', not 'sft_distill'.")
         return self
 
     def warn_group_size(self, group_size: int, env_name: str) -> None:

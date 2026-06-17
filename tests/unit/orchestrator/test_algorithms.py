@@ -27,16 +27,13 @@ def _ref_kind(ref):
         ("grpo", None, "policy", None, "rl"),
         ("max_rl", None, "policy", None, "rl"),
         ("opd", FROZEN, "policy", "frozen", "ref_kl"),
-        ("sft_distill", FROZEN, "frozen", None, "ce"),
-        ("sft_static", None, "static", None, "ce"),
+        ("sft", FROZEN, "frozen", None, "ce"),
         ("opsd", None, "policy", "policy", "ref_kl"),
         ("echo", None, "policy", None, "rl"),
     ],
 )
 def test_type_defaults_are_the_vetted_algorithms(advantage_type, model, source, advantage_model, action_loss_type):
     kwargs = {"advantage": {"type": advantage_type}, "model": model}
-    if advantage_type == "sft_static":
-        kwargs["sampling"] = {"source": {"type": "dataset", "name": "org/static-sft"}}
     algo = AlgorithmConfig(**kwargs)
     assert _ref_kind(algo.sampling.source) == source
     assert algo.advantage.type == advantage_type
@@ -70,21 +67,27 @@ def test_opd_requires_teacher():
         AlgorithmConfig(advantage={"type": "opd"})
 
 
-def test_sft_distill_requires_teacher():
-    with pytest.raises(ValueError, match="needs a teacher to sample rollouts from"):
-        AlgorithmConfig(advantage={"type": "sft_distill"})
+def test_sft_rejects_policy_source():
+    # sft on the default policy source is CE on the policy's own tokens — not a supervision target.
+    with pytest.raises(ValueError, match="non-policy source"):
+        AlgorithmConfig(advantage={"type": "sft"})
 
 
-def test_static_sft_requires_static_dataset_source():
-    with pytest.raises(ValueError, match="sampling.source.type='dataset'"):
-        AlgorithmConfig(advantage={"type": "sft_static"})
+def test_sft_accepts_dataset_source():
+    algo = AlgorithmConfig(
+        advantage={"type": "sft"},
+        sampling={"source": {"type": "dataset", "name": "org/static-sft"}},
+    )
+    assert _ref_kind(algo.sampling.source) == "static"
+    assert algo.advantage.action_loss_type == "ce"
 
 
-def test_static_dataset_source_uses_static_sft():
-    with pytest.raises(ValueError, match="uses advantage.type='sft_static'"):
+def test_dataset_source_requires_sft():
+    # A non-policy (dataset) source can only feed the ce loss; rl/ref_kl need policy logprobs.
+    with pytest.raises(ValueError, match="not the policy"):
         AlgorithmConfig(
             sampling={"source": {"type": "dataset", "name": "org/static-sft"}},
-            advantage={"type": "sft_distill"},
+            advantage={"type": "grpo"},
         )
 
 

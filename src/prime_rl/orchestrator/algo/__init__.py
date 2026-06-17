@@ -50,7 +50,7 @@ from prime_rl.orchestrator.algo.opd import OPDAlgorithm
 from prime_rl.orchestrator.algo.opsd import OPSDAlgorithm
 from prime_rl.orchestrator.algo.reward import RewardAlgorithm
 from prime_rl.orchestrator.algo.routing import stamp_advantages, stamp_loss_routing
-from prime_rl.orchestrator.algo.sft import SFTDistillAlgorithm, StaticSFTAlgorithm
+from prime_rl.orchestrator.algo.sft import SFTAlgorithm
 from prime_rl.orchestrator.types import RolloutView
 
 if TYPE_CHECKING:
@@ -67,8 +67,7 @@ ALGORITHM_CLASSES: dict[str, type[Algorithm]] = {
     "max_rl": MaxRLAlgorithm,
     "opd": OPDAlgorithm,
     "opsd": OPSDAlgorithm,
-    "sft_distill": SFTDistillAlgorithm,
-    "sft_static": StaticSFTAlgorithm,
+    "sft": SFTAlgorithm,
     "reward": RewardAlgorithm,
     "custom": CustomAlgorithm,
 }
@@ -93,8 +92,7 @@ __all__ = [
     "OPSDAlgorithm",
     "RewardAlgorithm",
     "RolloutView",
-    "SFTDistillAlgorithm",
-    "StaticSFTAlgorithm",
+    "SFTAlgorithm",
     "apply_advantage_fn",
     "build_algorithm",
     "connect_frozen_pool",

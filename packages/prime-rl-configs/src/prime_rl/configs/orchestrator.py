@@ -11,6 +11,7 @@ from renderers import AutoRendererConfig, RendererConfig
 from prime_rl.configs.algorithm import (
     AdvantageConfig,
     AlgorithmConfig,
+    StaticDatasetConfig,
 )
 from prime_rl.configs.shared import (
     BaseModelConfig,
@@ -870,8 +871,10 @@ class OrchestratorConfig(BaseConfig):
             if "group_size" not in env_cfg.model_fields_set:
                 env_cfg.group_size = self.group_size
             assert env_cfg.algo is not None  # materialized by inherit_env_algorithms
-            if env_cfg.algo.advantage.type == "sft_static" and env_cfg.group_size != 1:
-                raise ValueError("sft_static requires group_size=1 because dataset rows are already fixed targets")
+            if isinstance(env_cfg.algo.sampling.source, StaticDatasetConfig) and env_cfg.group_size != 1:
+                raise ValueError(
+                    "a static dataset source requires group_size=1 because dataset rows are already fixed targets"
+                )
             env_cfg.algo.warn_group_size(env_cfg.group_size, env_cfg.resolved_name)
 
         # Resolve train env num_workers from max_inflight_rollouts

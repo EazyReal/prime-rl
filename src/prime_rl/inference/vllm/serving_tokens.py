@@ -3,7 +3,7 @@
 vLLM 0.20 ships a generic tokens-in / tokens-out handler at
 ``vllm.entrypoints.serve.disagg.serving.ServingTokens`` that already covers
 prefix-cache salting, lora dispatch, multimodal features, prompt logprobs and
-priority. Three prime-RL features are not in the upstream protocol though, so
+priority. Four prime-RL features are not in the upstream protocol though, so
 we subclass it to add them back:
 
 1. ``data_parallel_rank`` routing — read from the ``X-data-parallel-rank``
@@ -14,7 +14,12 @@ we subclass it to add them back:
    decisions, surface them as base64 raw-byte payloads without requiring a vLLM
    source fork.
 
-3. Server-side ``max_tokens`` defaulting — ``ServingTokens`` hands the
+3. Raw image refs for multimodal rollouts — renderers send lightweight
+   ``mmraw:v1`` refs for new images and ``None`` for cache-only prior images.
+   This handler materializes refs into vLLM multimodal items and turns cache
+   misses into a structured retryable error.
+
+4. Server-side ``max_tokens`` defaulting — ``ServingTokens`` hands the
    client-supplied ``SamplingParams`` to the engine verbatim, and
    ``SamplingParams.max_tokens`` defaults to ``16`` (a dataclass-level
    default that predates the OpenAI-compat layer). Every other vLLM
@@ -30,8 +35,13 @@ delegates to upstream so we track future vLLM changes for free.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 from collections.abc import AsyncGenerator
-from functools import cached_property
+from dataclasses import dataclass
+from functools import cached_property, lru_cache
+from http import HTTPStatus
+from io import BytesIO
 from typing import Any
 
 from fastapi import Request
@@ -47,6 +57,13 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
 from prime_rl.inference.vllm.routed_experts import RoutedExpertsCapture
+
+
+@dataclass
+class _MMImageRefError(Exception):
+    message: str
+    err_type: str = "invalid_mm_image_ref"
+    status_code: HTTPStatus = HTTPStatus.BAD_REQUEST
 
 
 class PrimeRlGenerateResponseChoice(GenerateResponseChoice):
@@ -97,8 +114,163 @@ async def _client_set_max_tokens(raw_request: Request | None) -> bool:
     return isinstance(sp, dict) and "max_tokens" in sp
 
 
+def _is_missing_mm_cache_error(exc: BaseException) -> bool:
+    return "Expected a cached item for mm_hash=" in str(exc)
+
+
+def _cache_only_mm_hashes(features: Any) -> list[str]:
+    missing: list[str] = []
+    kwargs_data = features.kwargs_data or {}
+    for modality, hashes in features.mm_hashes.items():
+        items = kwargs_data.get(modality)
+        if items is None:
+            missing.extend(f"{modality}:{mm_hash}" for mm_hash in hashes)
+            continue
+        for idx, mm_hash in enumerate(hashes):
+            if idx >= len(items) or items[idx] is None:
+                missing.append(f"{modality}:{mm_hash}")
+    return missing
+
+
+def _missing_mm_cache_message(features: Any, exc: BaseException) -> str:
+    hashes = _cache_only_mm_hashes(features)
+    if not hashes:
+        return str(exc)
+    joined = ", ".join(hashes[:8])
+    suffix = "" if len(hashes) <= 8 else f", ... (+{len(hashes) - 8} more)"
+    return f"vLLM multimodal cache miss for {joined}{suffix}"
+
+
+def _processor_value(image_processor: Any, name: str, *, size_key: str | None = None) -> int:
+    value = getattr(image_processor, name, None)
+    if value is None and size_key is not None:
+        size = getattr(image_processor, "size", None)
+        if isinstance(size, dict):
+            value = size.get(size_key)
+    if value is None:
+        raise ValueError(f"Image processor is missing {name}")
+    return int(value)
+
+
+@lru_cache(maxsize=8)
+def _load_image_processor(model_name: str, trust_remote_code: bool):
+    from transformers import AutoProcessor
+
+    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=trust_remote_code)
+    image_processor = getattr(processor, "image_processor", None)
+    if image_processor is None:
+        raise ValueError(f"{model_name!r} does not expose an image_processor")
+    return image_processor
+
+
+def _qwen_image_processor_fingerprint(image_processor: Any) -> str:
+    from renderers.mm_store import image_layout_fingerprint
+
+    return image_layout_fingerprint(
+        family="qwen_vl",
+        patch_size=_processor_value(image_processor, "patch_size"),
+        merge_size=_processor_value(image_processor, "merge_size"),
+        temporal_patch_size=_processor_value(image_processor, "temporal_patch_size"),
+        min_pixels=_processor_value(image_processor, "min_pixels", size_key="shortest_edge"),
+        max_pixels=_processor_value(image_processor, "max_pixels", size_key="longest_edge"),
+    )
+
+
+def _materialize_raw_image_ref_sync(
+    ref: str,
+    *,
+    expected_modality: str,
+    expected_hash: str,
+    expected_placeholder_length: int | None,
+    processor_model_name: str,
+    trust_remote_code: bool,
+):
+    from PIL import Image
+    from renderers.mm_store import raw_image_path, split_image_ref
+    from vllm.model_executor.models.qwen2_vl import _create_qwen2vl_field_factory
+    from vllm.multimodal.inputs import MultiModalKwargsItems
+
+    try:
+        run_id, fingerprint, modality, mm_hash, raw_image_id, grid_thw = split_image_ref(ref)
+        if modality != expected_modality:
+            raise ValueError(f"Expected modality {expected_modality!r}, got {modality!r}")
+        if mm_hash != expected_hash:
+            raise ValueError(f"Expected image hash {expected_hash}, got {mm_hash}")
+
+        raw = raw_image_path(run_id=run_id, raw_image_id=raw_image_id).read_bytes()
+        actual_hash = hashlib.sha256(raw).hexdigest()[:32]
+        if actual_hash != mm_hash:
+            raise ValueError(f"Raw image hash mismatch: expected {mm_hash}, got {actual_hash}")
+
+        image_processor = _load_image_processor(processor_model_name, trust_remote_code)
+        actual_fingerprint = _qwen_image_processor_fingerprint(image_processor)
+        if actual_fingerprint != fingerprint:
+            raise ValueError(f"Image layout fingerprint mismatch: expected {fingerprint}, got {actual_fingerprint}")
+
+        image = Image.open(BytesIO(raw)).convert("RGB")
+        hf_inputs = image_processor(images=[image], return_tensors="pt")
+        merge_size = _processor_value(image_processor, "merge_size")
+        config_by_key = _create_qwen2vl_field_factory(merge_size)(hf_inputs)
+        item = MultiModalKwargsItems.from_hf_inputs(hf_inputs, config_by_key)["image"][0]
+
+        actual_grid = item["image_grid_thw"].data.tolist()
+        if actual_grid != grid_thw:
+            raise ValueError(f"Image grid mismatch: expected {grid_thw}, got {actual_grid}")
+        num_image_tokens = int(grid_thw[0] * grid_thw[1] * grid_thw[2] // (merge_size * merge_size))
+        if expected_placeholder_length is not None and expected_placeholder_length != num_image_tokens:
+            raise ValueError(
+                f"Image placeholder length mismatch: expected {expected_placeholder_length}, got {num_image_tokens}"
+            )
+        return item
+    except Exception as exc:
+        raise _MMImageRefError(str(exc)) from exc
+
+
+async def _decode_raw_mm_kwargs(
+    features: Any,
+    *,
+    processor_model_name: str,
+    trust_remote_code: bool,
+) -> dict[str, list[Any | None]]:
+    from renderers.mm_store import IMAGE_REF_PREFIX
+
+    kwargs_data = features.kwargs_data or {}
+    mm_kwargs: dict[str, list[Any | None]] = {}
+    for modality, hashes in features.mm_hashes.items():
+        placeholders = features.mm_placeholders.get(modality, [])
+        items = kwargs_data.get(modality)
+        if items is None:
+            mm_kwargs[modality] = [None] * len(hashes)
+            continue
+        if len(items) != len(hashes):
+            raise _MMImageRefError(
+                f"Multimodal kwargs/hash length mismatch for {modality}: {len(items)} != {len(hashes)}"
+            )
+        decoded: list[Any | None] = []
+        for idx, item in enumerate(items):
+            if item is None:
+                decoded.append(None)
+                continue
+            if modality != "image" or not isinstance(item, str) or not item.startswith(f"{IMAGE_REF_PREFIX}:"):
+                raise _MMImageRefError("v1 multimodal inference accepts raw image refs only")
+            placeholder_length = placeholders[idx].length if idx < len(placeholders) else None
+            decoded.append(
+                await asyncio.to_thread(
+                    _materialize_raw_image_ref_sync,
+                    item,
+                    expected_modality=modality,
+                    expected_hash=hashes[idx],
+                    expected_placeholder_length=placeholder_length,
+                    processor_model_name=processor_model_name,
+                    trust_remote_code=trust_remote_code,
+                )
+            )
+        mm_kwargs[modality] = decoded
+    return mm_kwargs
+
+
 class PrimeRlServingTokens(ServingTokens):
-    """ServingTokens + DP-rank routing + compact routed experts + max_tokens defaulting."""
+    """ServingTokens + DP-rank routing + routed experts + raw image refs + max_tokens defaulting."""
 
     @cached_property
     def _max_tokens_defaults(self) -> tuple[dict, int | None]:
@@ -148,26 +320,28 @@ class PrimeRlServingTokens(ServingTokens):
             raw_request.state.request_metadata = request_metadata
 
         # Build the engine input — features-aware (MM) or text-only fallback.
-        # Identical to upstream so we keep tracking it.
         if features := request.features:
-            from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item
             from vllm.inputs import mm_input
-            from vllm.multimodal.inputs import (
-                MultiModalKwargsItem,
-                PlaceholderRange,
-            )
+            from vllm.multimodal.inputs import PlaceholderRange
 
             mm_placeholders = {
                 modality: [PlaceholderRange(offset=p.offset, length=p.length) for p in ranges]
                 for modality, ranges in features.mm_placeholders.items()
             }
-            mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
-            if features.kwargs_data is not None:
-                for modality, items in features.kwargs_data.items():
-                    mm_kwargs[modality] = [decode_mm_kwargs_item(item) if item is not None else None for item in items]
-            else:
-                for modality, hashes in features.mm_hashes.items():
-                    mm_kwargs[modality] = [None] * len(hashes)
+            processor_model_name = getattr(self.model_config, "model", None) or model_name
+            trust_remote_code = bool(getattr(self.model_config, "trust_remote_code", False))
+            try:
+                mm_kwargs = await _decode_raw_mm_kwargs(
+                    features,
+                    processor_model_name=processor_model_name,
+                    trust_remote_code=trust_remote_code,
+                )
+            except _MMImageRefError as exc:
+                return self.create_error_response(
+                    message=exc.message,
+                    err_type=exc.err_type,
+                    status_code=exc.status_code,
+                )
             engine_input = mm_input(
                 prompt_token_ids=request.token_ids,
                 mm_kwargs=mm_kwargs,  # type: ignore[arg-type]
@@ -273,9 +447,18 @@ class PrimeRlServingTokens(ServingTokens):
             )
             result_generator = capture
 
-        response = await super().serve_tokens_full_generator(
-            request, result_generator, request_id, model_name, request_metadata
-        )
+        try:
+            response = await super().serve_tokens_full_generator(
+                request, result_generator, request_id, model_name, request_metadata
+            )
+        except AssertionError as exc:
+            if request.features is not None and _is_missing_mm_cache_error(exc):
+                return self.create_error_response(
+                    message=_missing_mm_cache_message(request.features, exc),
+                    err_type="missing_mm_cache_item",
+                    status_code=HTTPStatus.CONFLICT,
+                )
+            raise
 
         if capture is not None and isinstance(response, GenerateResponse):
             response = capture.post_process(response)

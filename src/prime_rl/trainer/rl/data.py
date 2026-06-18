@@ -16,6 +16,7 @@ from prime_rl.transport import (
     TransportConfig,
     setup_micro_batch_receiver,
 )
+from prime_rl.utils.mm import RawImageMaterializer
 
 
 class TensorMicroBatch(TypedDict):
@@ -38,11 +39,7 @@ class TensorMicroBatch(TypedDict):
     # MoE router replay
     routed_experts: Int[Tensor, "batch seq layers topk"] | None
 
-    # Generic multimodal kwargs — flat dict matching the model's forward
-    # signature (e.g. ``{"pixel_values": ..., "image_grid_thw": ...}`` for
-    # Qwen3-VL; ``{"pixel_values": ...}`` for Gemma3-VL). The trainer
-    # ``**`` -unpacks this into the forward call, so any HF VLM whose
-    # processor and forward agree on kwarg names works out of the box.
+    # Generic multimodal kwargs materialized by the trainer's model processor.
     mm_kwargs: dict[str, Tensor] | None
     # mm_token_type_ids: token type per token [batch seq], int64 (0=text, 1=image, 2=video)
     mm_token_type_ids: Int[Tensor, "batch seq"] | None
@@ -176,6 +173,8 @@ class DataLoader:
         pad_to_multiple_of: int,
         tokenizer: PreTrainedTokenizer,
         config: TransportConfig,
+        model_name: str,
+        model_trust_remote_code: bool,
     ):
         self.world = get_world()
 
@@ -194,6 +193,7 @@ class DataLoader:
         self.multi_run_manager = get_multi_run_manager()
 
         self.receiver: MicroBatchReceiver = setup_micro_batch_receiver(output_dir, dp_rank, start_step, config)
+        self.mm_materializer = RawImageMaterializer(model_name, trust_remote_code=model_trust_remote_code)
 
     def wait_for_batch(self) -> None:
         if self.world.is_master:
@@ -216,13 +216,9 @@ class DataLoader:
             micro_batch.lora_num_tokens[0] = len(micro_batch.input_ids)
         mm_kwargs: dict[str, Tensor] | None = None
         if micro_batch.mm_kwargs:
-            # Each value is an EncodedTensor (dtype, shape, raw bytes).
-            # No batch dim — the orchestrator concatenates per-image along
-            # dim=0 generically, matching what each HF VLM's forward expects.
-            mm_kwargs = {
-                key: torch.frombuffer(bytearray(payload.data), dtype=_torch_dtype(payload.dtype)).reshape(payload.shape)
-                for key, payload in micro_batch.mm_kwargs.items()
-            }
+            raise ValueError("Processed multimodal mm_kwargs are unsupported in v1; use raw mm_refs")
+        if micro_batch.mm_refs is not None:
+            mm_kwargs = self.mm_materializer.materialize(micro_batch.mm_refs)
         routed_experts = None
         packed_routed_experts = micro_batch.routed_experts
         if packed_routed_experts is not None:

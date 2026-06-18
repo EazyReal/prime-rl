@@ -25,6 +25,7 @@ from prime_rl.utils.pathing import (
     validate_output_dir,
 )
 from prime_rl.utils.process import cleanup_processes, cleanup_threads, monitor_process, set_proc_title
+from prime_rl.utils.run_assets import run_asset_env
 
 RL_TOML = "rl.toml"
 RL_SBATCH = "rl.sbatch"
@@ -160,6 +161,7 @@ def rl_local(config: RLConfig):
         "WANDB_SHARED_MODE": "1",
         "WANDB_SHARED_RUN_ID": os.environ.get("WANDB_SHARED_RUN_ID", uuid.uuid4().hex),
     }
+    shared_run_asset_env = run_asset_env(config.orchestrator.output_dir)
 
     # Validate client port matches inference server port
     if config.inference is not None and not config.orchestrator.student.client.is_elastic:
@@ -205,7 +207,7 @@ def rl_local(config: RLConfig):
                 inference_process = Popen(
                     inference_cmd,
                     env={
-                        **os.environ,
+                        **shared_run_asset_env,
                         "CUDA_VISIBLE_DEVICES": ",".join(map(str, infer_gpu_ids)),
                     },
                     stdout=log_file,
@@ -251,7 +253,7 @@ def rl_local(config: RLConfig):
             with open(env_log, "w") as log_file:
                 env_process = Popen(
                     env_cmd,
-                    env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+                    env={**shared_run_asset_env, "CUDA_VISIBLE_DEVICES": ""},
                     stdout=log_file,
                     stderr=log_file,
                 )
@@ -275,7 +277,7 @@ def rl_local(config: RLConfig):
                 stdout=log_file,
                 stderr=log_file,
                 env={
-                    **os.environ,
+                    **shared_run_asset_env,
                     **wandb_shared_env,
                     "WANDB_SHARED_LABEL": "orchestrator",
                     "LOGURU_FORCE_COLORS": "1",
@@ -321,7 +323,7 @@ def rl_local(config: RLConfig):
             trainer_process = Popen(
                 trainer_cmd,
                 env={
-                    **os.environ,
+                    **shared_run_asset_env,
                     **wandb_shared_env,
                     "WANDB_SHARED_LABEL": "trainer",
                     "CUDA_VISIBLE_DEVICES": ",".join(map(str, trainer_gpu_ids)),

@@ -74,6 +74,38 @@ type = "grpo"  # the default
 | `reward` | policy | `rl` on actions | REINFORCE-style: advantage = raw reward, no group baseline. |
 | `custom` | policy | `rl` on actions | Your own advantage function (`import_path`), per-token advantages per rollout — see [Custom Advantage](#custom-advantage). |
 
+#### SFT Sources
+
+`sft` always trains cross-entropy on non-policy target tokens. A frozen teacher source samples those targets from an externally hosted model:
+
+```toml
+[orchestrator.algo.advantage]
+type = "sft"
+
+[orchestrator.algo.teacher]  # alias for sampling.source on sft
+name = "teacher-model"
+base_url = ["http://teacher:8000/v1"]
+```
+
+A static dataset source replays stored targets locally. Set `type = "dataset"` explicitly so the source table is read as a dataset, not a model reference:
+
+```toml
+[orchestrator.algo.advantage]
+type = "sft"
+
+[orchestrator.algo.sampling.source]
+type = "dataset"
+name = "org/my-sft-dataset"
+split = "train"
+# optional: subset, max_examples, messages_column, prompt_column, completion_column
+
+[[orchestrator.train.env]]
+name = "static-sft"
+group_size = 1
+```
+
+Static dataset rows use either a `messages` column or `prompt` + `completion` columns. The dataset path does not start a Verifiers env or select a model client.
+
 ### Customizing Components
 
 Every key beyond `type` is visibly your own assembly — there is no preset layer to diverge from. The vetted setting is the class defaults; what you set is what runs:

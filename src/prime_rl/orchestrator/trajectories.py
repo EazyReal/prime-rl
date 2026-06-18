@@ -135,23 +135,18 @@ def _convert_tools_to_oai_format(tool_defs: list) -> list[dict[str, Any]] | None
             return tool.get(key)
         return getattr(tool, key, None)
 
-    tools: list[dict[str, Any]] = []
-    for tool in tool_defs:
-        if isinstance(tool, dict) and tool.get("type") == "function" and "function" in tool:
-            tools.append(tool)
-            continue
-        tools.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": _get(tool, "name"),
-                    "description": _get(tool, "description"),
-                    "parameters": _get(tool, "parameters"),
-                    **({} if _get(tool, "strict") is None else {"strict": _get(tool, "strict")}),
-                },
-            }
-        )
-    return tools
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": _get(tool, "name"),
+                "description": _get(tool, "description"),
+                "parameters": _get(tool, "parameters"),
+                **({} if _get(tool, "strict") is None else {"strict": _get(tool, "strict")}),
+            },
+        }
+        for tool in tool_defs
+    ]
 
 
 def _tokenize_step_with_renderer(

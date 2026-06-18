@@ -113,7 +113,7 @@ def test_opd_rejects_policy():
 
 
 def test_rl_loss_type_incompatible_with_frozen_sampling():
-    with pytest.raises(ValueError, match="sampling.source is a frozen model"):
+    with pytest.raises(ValueError, match="not the policy"):
         AlgorithmConfig(sampling={"source": FROZEN}, advantage={"type": "grpo"})
 
 

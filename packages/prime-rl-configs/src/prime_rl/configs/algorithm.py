@@ -2,8 +2,8 @@
 
 An algorithm is a bundle of two pieces:
 
-1. **Sampling** — which model generates train rollouts. ``source`` is a model
-   reference: ``"policy"`` (the live policy) or an inline frozen hosted model.
+1. **Sampling** — where train rollouts come from. ``source`` is ``"policy"``
+   (the live policy), an inline frozen hosted model, or a static dataset.
 2. **Advantage** — credit assignment and loss routing, fused: one mapping from
    a finalized rollout to per-token ``(loss component, weight)``.
    Group-relative strategies compute scalars on the orchestrator and ship
@@ -85,9 +85,6 @@ class StaticDatasetConfig(BaseConfig):
 
     completion_column: str = "completion"
     """Completion column used with ``prompt_column`` when no messages column is present."""
-
-    tools_column: str = "tools"
-    """Optional tools column; ``tool_defs`` is also accepted for rollout-shaped rows."""
 
     max_examples: int | None = Field(None, ge=1)
     """Optional cap on loaded examples for smoke tests and small runs."""

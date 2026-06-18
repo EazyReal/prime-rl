@@ -380,7 +380,7 @@ class RolloutDispatcher:
         )
 
     async def schedule_group_rollout(self, group_id: uuid.UUID, group: GroupState) -> bool:
-        """Dispatch one ``run_rollout`` / ``run_group`` task for this group.
+        """Dispatch rollout work for this group.
 
         Returns False only if we couldn't even schedule one rollout (no clients
         ready, no permits). Returns True after issuing one task — the caller
@@ -391,25 +391,30 @@ class RolloutDispatcher:
             return False
         env = env_collection.get(group.env_name)
 
-        # A static dataset source has no model to query: build the rollout
-        # locally from the dataset row instead of scheduling against an
-        # inference pool (no client, one permit, no policy-version pinning).
         if group.kind == "train" and env.sampler.source_kind == "dataset":
-            permits = 1
-            group.rollouts_to_schedule -= 1
-            await self.acquire(permits)
-            task = asyncio.create_task(env.run_static_rollout(group.example))
-            self.inflight[task] = InflightRollout(
-                kind=group.kind,
-                env_name=group.env_name,
-                group_id=group_id,
-                policy_version=group.policy_version_at_start,
-                rollout_count=permits,
-                client_config=None,
-                eval_step=group.eval_step,
-            )
-            return True
+            return await self._schedule_static_replay_rollout(group_id, group, env)
 
+        return await self._schedule_model_sampled_rollout(group_id, group, env)
+
+    async def _schedule_static_replay_rollout(self, group_id: uuid.UUID, group: GroupState, env) -> bool:
+        """Replay one train rollout locally from a static dataset row."""
+        permits = 1
+        group.rollouts_to_schedule -= 1
+        await self.acquire(permits)
+        task = asyncio.create_task(env.run_static_rollout(group.example))
+        self.inflight[task] = InflightRollout(
+            kind=group.kind,
+            env_name=group.env_name,
+            group_id=group_id,
+            policy_version=group.policy_version_at_start,
+            rollout_count=permits,
+            client_config=None,
+            eval_step=group.eval_step,
+        )
+        return True
+
+    async def _schedule_model_sampled_rollout(self, group_id: uuid.UUID, group: GroupState, env) -> bool:
+        """Sample one rollout through a model-backed Verifiers env."""
         # Train rollouts use the env sampler's pool via the
         # renderer/token train client. Eval always evaluates the policy and
         # goes through the eval client (chat-completions) — the same path the

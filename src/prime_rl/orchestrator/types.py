@@ -36,7 +36,7 @@ RolloutKind = Literal["train", "eval"]
 @dataclass
 class InflightRollout:
     """Per-task scheduling state in the dispatcher; one entry per in-flight
-    ``run_rollout`` / ``run_group`` task."""
+    rollout-producing task."""
 
     kind: RolloutKind
     env_name: str
@@ -50,8 +50,8 @@ class InflightRollout:
 
 @dataclass
 class GroupState:
-    """Per-group dispatcher state: what's left to schedule + the pinned
-    client (for prefix-cache hits)."""
+    """Per-example dispatcher state: what's left to schedule + the pinned
+    client for model-backed rollouts (for prefix-cache hits)."""
 
     kind: RolloutKind
     env_name: str

@@ -30,14 +30,14 @@ This page covers the math and the configurable algorithmic components: the algor
 
 A training algorithm in `prime-rl` is a bundle of two components, configured under `[orchestrator.algo]`:
 
-1. **Sampling** (`algo.sampling`) — how train rollouts are produced: which model generates them. `source` is a [model reference](#model-references): `"policy"` (the live policy, the default) or an inline frozen hosted model. Group sizing stays on the env config (`group_size`).
+1. **Sampling** (`algo.sampling`) — how train rollouts are produced. `source` is `"policy"` (the live policy, the default), an inline frozen hosted model, or a static supervised dataset. Group sizing stays on the env config (`group_size`).
 2. **Advantage** (`algo.advantage`) — the per-token training signal: credit assignment and loss routing, fused. One mapping from a finalized rollout to per-token *(loss component, weight)* pairs — the credit a token gets and the loss that consumes it are two coordinates of the same output. Group-relative strategies compute credit on the orchestrator and ship per-token advantage streams; reference-KL strategies query a reference model at batch-ship time (bounded concurrency) and ship its prefill logprobs for the trainer to evaluate against the live policy. The strategy determines which loss component consumes the action tokens (`rl` / `ce` / `ref_kl`) and what happens to env-provided observation tokens in multi-turn rollouts (masked out by default; `echo` trains on them with weighted CE).
 
 The trainer is algorithm-blind: the loss is a sum of three components (rl, ce, ref_kl), each normalized by its own global token count; per-token streams ship on the wire (the `rl_weights` / `ce_weights` / `ref_kl_weights` component weights plus the `advantages` stream on each training sample) and the trainer just executes them. Adding an algorithm never touches the dispatcher, packer, or trainer hot path.
 
 ### Model References
 
-`prime-rl` hosts exactly one model: the trainable policy (`[orchestrator.model]`). Every other model an algorithm uses is an external OpenAI-compatible endpoint, declared *inline on the component that uses it*. A model reference is either the string `"policy"` (the live policy) or a frozen hosted model (`name` + `base_url`):
+`prime-rl` hosts exactly one model: the trainable policy (`[orchestrator.model]`). Every other model an algorithm uses is an external OpenAI-compatible endpoint, declared *inline on the component that uses it*. A model reference is either the string `"policy"` (the live policy) or a frozen hosted model (`name` + `base_url`); static datasets are rollout sources, not model references:
 
 ```toml
 [orchestrator.algo.advantage]
@@ -52,7 +52,7 @@ Model *roles* are labels the algorithm itself declares over these references —
 
 `algo.model` (alias: `algo.teacher`) is shorthand for the slot the advantage type declares for its reference — `advantage.model` for `opd` / `opsd`, `sampling.source` for `sft` (its teacher or dataset is the sampling source). A slot you didn't set takes the shorthand; an explicit reference that already equals it is accepted, a disagreeing one is an error. Set the component fields directly for multi-model setups.
 
-Liveness is a property of the reference, not of any role: rollouts sampled from `"policy"` get version-salted prefix caches, carry sampling logprobs for importance ratios, and age off-policy as weights update; rollouts and scores from frozen models get a stable prefix cache and never go stale. Frozen models are externally hosted (`base_url` is required) — `prime-rl` never launches or updates them, and each env's algorithm builds its own client pool to the endpoints it declares.
+Liveness is a property of the source, not of any role: rollouts sampled from `"policy"` get version-salted prefix caches, carry sampling logprobs for importance ratios, and age off-policy as weights update; rollouts and scores from frozen models get a stable prefix cache and never go stale; dataset-sourced rollouts are local message replay with no env or client. Frozen models are externally hosted (`base_url` is required) — `prime-rl` never launches or updates them, and each env's algorithm builds its own client pool to the endpoints it declares.
 
 ### The Algorithms
 
@@ -111,7 +111,7 @@ kwargs = { patterns = ["WARNING"] }
 def drop_warnings(rollout, *, patterns: list[str]) -> list[list[bool]]: ...
 ```
 
-Component compatibility is validated at config time: frozen-model sampling can only feed the `ce` loss component — the `rl` and `ref_kl` components need the live policy's own sampling logprobs for importance ratios — `opd` pointed at `"policy"` is rejected as degenerate (zero KL), `sft` with the policy as its source is rejected (CE on the policy's own tokens is not a supervision target), and group-relative advantage with `group_size = 1` warns that every advantage collapses to zero.
+Component compatibility is validated at config time: non-policy sampling can only feed the `ce` loss component — the `rl` and `ref_kl` components need the live policy's own sampling logprobs for importance ratios — `opd` pointed at `"policy"` is rejected as degenerate (zero KL), `sft` with the policy as its source is rejected (CE on the policy's own tokens is not a supervision target), and group-relative advantage with `group_size = 1` warns that every advantage collapses to zero.
 
 ### Per-Env Algorithms
 

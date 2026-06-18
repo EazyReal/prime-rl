@@ -50,11 +50,6 @@ class Sampler:
             return "dataset"
         return "frozen_model"
 
-    @property
-    def static_dataset(self) -> StaticDatasetConfig:
-        assert isinstance(self.config.source, StaticDatasetConfig)
-        return self.config.source
-
     def sampling_args(self, args: dict) -> dict:
         """Source-specific sampling-arg overrides. Sampling logprobs are only
         needed for importance ratios on policy-sampled tokens — frozen

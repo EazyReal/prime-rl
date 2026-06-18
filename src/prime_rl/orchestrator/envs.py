@@ -11,6 +11,7 @@ import verifiers as vf
 from verifiers.serve import ZMQEnvClient, ZMQEnvServer
 from verifiers.utils.serve_utils import get_free_port
 
+from prime_rl.configs.algorithm import StaticDatasetConfig
 from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig, TrainEnvConfig
 from prime_rl.orchestrator.algo import Algorithm, build_algorithm
 from prime_rl.orchestrator.sampler import Sampler
@@ -194,12 +195,15 @@ class TrainEnv(Env):
         await super().start(log_dir=log_dir, log_level=log_level, json_logging=json_logging)
 
     def get_dataset(self, seed: int | None = None):
-        if self.sampler.source_kind == "dataset":
-            return load_static_sft_rows(self.sampler.static_dataset, seed=seed)
+        source = self.sampler.config.source
+        if isinstance(source, StaticDatasetConfig):
+            return load_static_sft_rows(source, seed=seed)
         return self.env.get_dataset(seed=seed)
 
     async def run_static_rollout(self, example: dict) -> vf.RolloutOutput:
-        return static_sft_rollout(example, self.sampler.static_dataset)
+        source = self.sampler.config.source
+        assert isinstance(source, StaticDatasetConfig)
+        return static_sft_rollout(example, source)
 
 
 class EvalEnv(Env):

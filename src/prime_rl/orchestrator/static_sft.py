@@ -27,7 +27,6 @@ def load_static_sft_rows(config: StaticDatasetConfig, *, seed: int | None = None
 
 def static_sft_rollout(row: dict, config: StaticDatasetConfig) -> vf.RolloutOutput:
     messages = _row_messages(row, config)
-    tools = _row_tools(row, config)
     trajectory = _trajectory_from_messages(messages)
 
     return vf.RolloutOutput(
@@ -51,7 +50,6 @@ def static_sft_rollout(row: dict, config: StaticDatasetConfig) -> vf.RolloutOutp
             "final_input_tokens": 0.0,
             "final_output_tokens": 0.0,
         },
-        tool_defs=tools,
     )
 
 
@@ -68,16 +66,6 @@ def _row_messages(row: dict, config: StaticDatasetConfig) -> list[dict[str, Any]
     prompt = normalize_messages(_maybe_json(row[config.prompt_column]), default_role="user")
     completion = normalize_messages(_maybe_json(row[config.completion_column]), default_role="assistant")
     return prompt + completion
-
-
-def _row_tools(row: dict, config: StaticDatasetConfig) -> list[dict[str, Any]]:
-    raw = row.get(config.tools_column, row.get("tool_defs"))
-    if raw is None:
-        return []
-    parsed = _maybe_json(raw)
-    if not isinstance(parsed, list):
-        raise TypeError(f"Static SFT tools must be a list, got {type(parsed).__name__}")
-    return parsed
 
 
 def _trajectory_from_messages(messages: list[dict[str, Any]]) -> list[vf.TrajectoryStep]:

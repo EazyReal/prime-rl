@@ -143,7 +143,7 @@ kwargs = { patterns = ["WARNING"] }
 def drop_warnings(rollout, *, patterns: list[str]) -> list[list[bool]]: ...
 ```
 
-Component compatibility is validated at config time: non-policy sampling can only feed the `ce` loss component — the `rl` and `ref_kl` components need the live policy's own sampling logprobs for importance ratios — `opd` pointed at `"policy"` is rejected as degenerate (zero KL), `sft` with the policy as its source is rejected (CE on the policy's own tokens is not a supervision target), and group-relative advantage with `group_size = 1` warns that every advantage collapses to zero.
+Component compatibility is validated at config time: non-policy sampling can only feed the `ce` loss component — the `rl` and `ref_kl` components need the live policy's own sampling logprobs for importance ratios — `opd` pointed at `"policy"` is rejected as degenerate (zero KL), and `sft` with the policy as its source is rejected (CE on the policy's own tokens is not a supervision target). A group-relative algorithm with `group_size = 1` produces all-zero advantages; the resulting empty batch is caught at runtime (the orchestrator warns and aborts after repeated zero-trainable batches), not at config time.
 
 ### Per-Env Algorithms
 
@@ -315,7 +315,7 @@ The advantage strategy is the `advantage` component of the [algorithm](#the-algo
 | `reward` | `rl` | Advantage = raw reward, no baseline. |
 | `opd` | `ref_kl` | On-policy distillation: per-token reverse KL to a reference model (`model`, an inline frozen hosted model), evaluated in the trainer from shipped reference logprobs. No credit — rollouts keep `advantages = None` (advantage-based filters never fire) and ship no advantage stream; `group_size` only fans out sampling. |
 | `opsd` | `ref_kl` | SDFT: per-token reverse KL to a demo-conditioned reference. No credit — rollouts keep `advantages = None` (advantage-based filters never fire) and ship no advantage stream. |
-| `sft` | `ce` | Cross-entropy on the source's target tokens (a frozen teacher's rollouts or a static dataset's traces). No credit is assigned. |
+| `sft` | `ce` | Cross-entropy on the source's target tokens (a frozen teacher's rollouts or a static dataset's traces). Assigns no advantage — trains on every target token. |
 | `custom` | `rl` | Your function (below); per-token advantages per rollout. |
 
 ### Default Advantage

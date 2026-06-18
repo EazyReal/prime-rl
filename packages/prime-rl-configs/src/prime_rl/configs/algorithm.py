@@ -25,7 +25,6 @@ ref_kl), each normalized by its own global token count; per-token component
 weights ship on the wire and the trainer just executes them.
 """
 
-import warnings
 from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 from pydantic import AliasChoices, Field, model_validator
@@ -149,7 +148,6 @@ class GRPOAdvantageConfig(BaseConfig):
     consumed by the ``rl`` loss component on the rollout's action tokens."""
 
     action_loss_type: ClassVar[ActionLossType] = "rl"
-    group_relative: ClassVar[bool] = True
 
     length_penalty: LengthPenaltyConfig | None = None
     """Correctness-gated length penalty. ``tokens`` shapes by weighted token cost; ``turns`` shapes by trajectory turn count; None disables shaping. In mixed groups, lower-cost correct rollouts get amplified advantage (up to 2x), higher-cost correct rollouts are unchanged, incorrect untouched. In all-correct groups, below-average-cost rollouts get advantage in [0, 1], others get 0."""
@@ -227,7 +225,6 @@ class MaxRLAdvantageConfig(BaseConfig):
     zero-advantage filter drops it, matching the paper's K=0 convention)."""
 
     action_loss_type: ClassVar[ActionLossType] = "rl"
-    group_relative: ClassVar[bool] = True
 
 
 class RewardAdvantageConfig(BaseConfig):
@@ -236,7 +233,6 @@ class RewardAdvantageConfig(BaseConfig):
     ``rl`` loss component."""
 
     action_loss_type: ClassVar[ActionLossType] = "rl"
-    group_relative: ClassVar[bool] = False
 
 
 class OPDAdvantageConfig(BaseConfig):
@@ -250,7 +246,6 @@ class OPDAdvantageConfig(BaseConfig):
     only fans out sampling."""
 
     action_loss_type: ClassVar[ActionLossType] = "ref_kl"
-    group_relative: ClassVar[bool] = False
     model_role: ClassVar[str] = "teacher"
 
     model: ModelReference | None = None
@@ -275,7 +270,6 @@ class OPSDAdvantageConfig(BaseConfig):
     samples ship a neutral 0.0."""
 
     action_loss_type: ClassVar[ActionLossType] = "ref_kl"
-    group_relative: ClassVar[bool] = False
     model_role: ClassVar[str] = "teacher"
 
     model: ModelReference = "policy"
@@ -303,9 +297,9 @@ class OPSDAdvantageConfig(BaseConfig):
 
 class SFTAdvantageConfig(BaseConfig):
     type: Literal["sft"] = "sft"
-    """Supervised fine-tuning: cross-entropy on the sampled target tokens. No
-    credit is assigned — the target tokens themselves are the supervision. The
-    source supplies the targets and decides the flavor: a frozen hosted model
+    """Supervised fine-tuning: cross-entropy on the source's target tokens. The
+    ``ce`` loss ignores advantages and SFT assigns none — it trains on every
+    target token. The source decides the flavor: a frozen hosted model
     (``sampling.source`` a frozen model, or the ``teacher`` shorthand) is
     distillation on freshly sampled teacher tokens; a static dataset
     (``sampling.source.type = "dataset"``) is replay of stored supervised
@@ -313,6 +307,8 @@ class SFTAdvantageConfig(BaseConfig):
     supervision target."""
 
     action_loss_type: ClassVar[ActionLossType] = "ce"
+    source_role: ClassVar[str] = "teacher"
+    """The sampling source is this algorithm's teacher-or-dataset target source."""
 
 
 class CustomAdvantageConfig(BaseConfig):
@@ -322,7 +318,6 @@ class CustomAdvantageConfig(BaseConfig):
     each rollout's completion tokens."""
 
     action_loss_type: ClassVar[ActionLossType] = "rl"
-    group_relative: ClassVar[bool] = False
 
     import_path: str
     """Import path to the advantage function (e.g. ``my_module.my_advantage``)."""
@@ -384,13 +379,6 @@ class AlgorithmConfig(BaseConfig):
     """The per-token training signal: credit assignment and loss routing,
     fused. The ``type`` selects the algorithm."""
 
-    @property
-    def requires_group_advantage(self) -> bool:
-        """True when the advantage strategy assigns group-relative scalars,
-        i.e. degenerate with ``group_size=1``. Advantages that don't declare
-        ``group_relative`` (e.g. ``sft``) are not group-relative."""
-        return getattr(self.advantage, "group_relative", False)
-
     @model_validator(mode="after")
     def fold_model(self):
         """Fold the ``model`` shorthand into the component references.
@@ -410,9 +398,7 @@ class AlgorithmConfig(BaseConfig):
                 matched = True
             elif advantage.model == self.model:
                 matched = True
-        # sft's supervised tokens come from its sampling source, so the teacher
-        # shorthand folds there (sft has no advantage.model).
-        if isinstance(advantage, SFTAdvantageConfig):
+        if getattr(advantage, "source_role", None) is not None:
             if "source" not in self.sampling.model_fields_set:
                 self.sampling.source = self.model
                 matched = True
@@ -455,15 +441,3 @@ class AlgorithmConfig(BaseConfig):
                 "Use the 'sft' advantage to train on a frozen model's or dataset's tokens."
             )
         return self
-
-    def warn_group_size(self, group_size: int, env_name: str) -> None:
-        """Group-relative scoring with a single rollout per example collapses
-        every advantage to zero. Warn loudly — this is the classic footgun."""
-        if self.requires_group_advantage and group_size == 1:
-            warnings.warn(
-                f"Env '{env_name}' uses group-relative advantage ('{self.advantage.type}') with "
-                "group_size=1 — every advantage is 0 and (with the default zero-advantage filter) "
-                "no rollout will train. Set group_size >= 2 or a non-group-relative advantage "
-                "(e.g. advantage.type='reward').",
-                stacklevel=2,
-            )

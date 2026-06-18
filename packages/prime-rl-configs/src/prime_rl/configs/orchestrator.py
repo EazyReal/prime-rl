@@ -875,7 +875,6 @@ class OrchestratorConfig(BaseConfig):
                 raise ValueError(
                     "a static dataset source requires group_size=1 because dataset rows are already fixed targets"
                 )
-            env_cfg.algo.warn_group_size(env_cfg.group_size, env_cfg.resolved_name)
 
         # Resolve train env num_workers from max_inflight_rollouts
         for env_cfg in self.train.env:

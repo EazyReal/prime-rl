@@ -391,6 +391,9 @@ class RolloutDispatcher:
             return False
         env = env_collection.get(group.env_name)
 
+        # A static dataset source has no model to query: build the rollout
+        # locally from the dataset row instead of scheduling against an
+        # inference pool (no client, one permit, no policy-version pinning).
         if group.kind == "train" and env.sampler.source_kind == "dataset":
             permits = 1
             group.rollouts_to_schedule -= 1

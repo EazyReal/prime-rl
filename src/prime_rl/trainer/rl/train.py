@@ -240,6 +240,7 @@ def train(config: TrainerConfig):
             config.rollout_transport,
             config.model.name,
             config.model.trust_remote_code,
+            missing_mm_image_policy=config.missing_mm_image_policy,
         )
 
     token_exporter = setup_token_exporter(config, parallel_dims, world, logger)
@@ -644,9 +645,12 @@ def train(config: TrainerConfig):
             "time/step": step_time,
             "time/wait_for_batch": wait_for_batch_time,
             "time/load_data": load_data_time,
+            "time/mm_materialize": getattr(dataloader, "last_mm_materialize_time", 0.0),
             "time/broadcast_weights": broadcast_weights_time,
             "time/save_ckpt": save_ckpt_time,
             "time/forward_backward": forward_backward_time,
+            "mm/images_materialized": getattr(dataloader, "last_mm_images_materialized", 0),
+            "mm/images_placeholdered": getattr(dataloader, "last_mm_images_placeholdered", 0),
             "step": progress.step,
         }
         monitor.log(time_metrics, step=progress.step)

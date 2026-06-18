@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Iterable, Mapping
 from io import BytesIO
 from pathlib import Path
@@ -30,6 +31,18 @@ def file_uri_to_path(uri: str) -> Path:
     if parsed.netloc not in ("", "localhost"):
         raise ValueError(f"file:// multimodal refs must be local paths, got {uri!r}")
     return Path(unquote(parsed.path))
+
+
+def missing_file_uris(uris: Iterable[str]) -> list[str]:
+    """Return missing local ``file://`` image refs; non-file refs are ignored."""
+    missing: list[str] = []
+    for uri in uris:
+        parsed = urlparse(uri)
+        if parsed.scheme != "file":
+            continue
+        if not Path(unquote(parsed.path)).exists():
+            missing.append(uri)
+    return missing
 
 
 def image_file_uris_from_messages(messages: Iterable[Any]) -> list[str]:
@@ -156,6 +169,19 @@ def _expected_image_grid(item: Mapping[str, Any]) -> list[int] | None:
     return [int(v) for v in grid]
 
 
+def _patch_area(patch_size: Any) -> int:
+    if isinstance(patch_size, list | tuple):
+        return math.prod(int(dim) for dim in patch_size)
+    size = int(patch_size)
+    return size * size
+
+
+def _temporal_patch_extent(temporal_patch_size: Any) -> int:
+    if isinstance(temporal_patch_size, list | tuple):
+        return math.prod(int(dim) for dim in temporal_patch_size)
+    return int(temporal_patch_size)
+
+
 class RawImageMaterializer:
     """Materialize raw image refs with the trainer model's HF image processor."""
 
@@ -216,3 +242,56 @@ class RawImageMaterializer:
                     )
 
         return tensors
+
+    def placeholder_feature_dim(self) -> int:
+        image_processor = self.image_processor
+        patch_size = getattr(image_processor, "patch_size", None)
+        temporal_patch_size = getattr(image_processor, "temporal_patch_size", None)
+        image_mean = getattr(image_processor, "image_mean", None)
+        channels = len(image_mean) if image_mean is not None else getattr(image_processor, "num_channels", 3)
+        if patch_size is None or temporal_patch_size is None:
+            raise ValueError(
+                "Cannot synthesize raw image placeholders without image processor patch_size and temporal_patch_size"
+            )
+        return int(channels) * _temporal_patch_extent(temporal_patch_size) * _patch_area(patch_size)
+
+    def synthesize_placeholder(self, refs: MMRefs | None) -> dict[str, torch.Tensor] | None:
+        """Build zero-valued Qwen-style image tensors from raw descriptor geometry.
+
+        This recovery path is only used when raw image files disappear before
+        trainer materialization. The original ``image_grid_thw`` is preserved so
+        the model sees the same placeholder geometry used during rollout
+        tokenization, while the dataloader masks the affected microbatch loss.
+        """
+        if refs is None:
+            return None
+
+        import torch
+
+        image_items = refs.descriptor.get("mm_items", {}).get(IMAGE_MODALITY, [])
+        image_hashes = refs.descriptor.get("mm_hashes", {}).get(IMAGE_MODALITY, [])
+        if not image_items:
+            return None
+        if len(refs.uris) != len(image_items) or len(image_hashes) != len(image_items):
+            raise ValueError(
+                "Raw image refs must have matching URI, descriptor, and hash counts "
+                f"(uris={len(refs.uris)}, descriptors={len(image_items)}, hashes={len(image_hashes)})"
+            )
+
+        feature_dim = self.placeholder_feature_dim()
+        pixel_values: list[torch.Tensor] = []
+        image_grid_thw: list[list[int]] = []
+        for idx, item in enumerate(image_items):
+            validate_raw_mm_item(item)
+            grid = _expected_image_grid(item)
+            if grid is None:
+                raise ValueError(f"Cannot synthesize image placeholder {idx}: image_grid_thw is missing")
+            if len(grid) != 3 or any(dim <= 0 for dim in grid):
+                raise ValueError(f"Cannot synthesize image placeholder {idx}: invalid image_grid_thw={grid}")
+            pixel_values.append(torch.zeros((math.prod(grid), feature_dim), dtype=torch.float32))
+            image_grid_thw.append(grid)
+
+        return {
+            "pixel_values": torch.cat(pixel_values, dim=0).contiguous(),
+            "image_grid_thw": torch.tensor(image_grid_thw, dtype=torch.long),
+        }

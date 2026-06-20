@@ -3,7 +3,10 @@ import json
 from unittest.mock import Mock
 
 import pyarrow.parquet as pq
+import verifiers.v1 as vf
+from verifiers.v1.graph import MessageNode
 
+from prime_rl.orchestrator.types import Rollout
 from prime_rl.utils.monitor.prime import PrimeMonitor
 
 
@@ -13,32 +16,29 @@ def _new_monitor() -> PrimeMonitor:
     return monitor
 
 
-def _build_rollout(*, example_id: int, reward: float, task: str) -> dict:
-    return {
-        "example_id": example_id,
-        "prompt": [{"role": "user", "content": f"prompt-{example_id}"}],
-        "completion": [{"role": "assistant", "content": f"completion-{example_id}"}],
-        "trajectory": [
-            {
-                "prompt": [{"role": "user", "content": f"prompt-{example_id}"}],
-                "completion": [{"role": "assistant", "content": f"completion-{example_id}"}],
-                "reward": reward,
-                "advantage": reward / 2,
-                "extras": {"source": "test"},
-                "tokens": {
-                    "prompt_ids": [1, 2, 3],
-                    "completion_ids": [4, 5],
-                },
-            }
+def _build_rollout(*, example_id: int, reward: float, task: str) -> Rollout:
+    return Rollout(
+        task=vf.Task(idx=example_id, prompt=f"prompt-{example_id}"),
+        env_name=task,
+        rewards={"score": reward},
+        metrics={"accuracy": reward},
+        advantages=[reward / 2],
+        nodes=[
+            MessageNode(
+                message=vf.UserMessage(content=f"prompt-{example_id}"),
+                token_ids=[1, 2, 3],
+                mask=[False, False, False],
+            ),
+            MessageNode(
+                parent=0,
+                message=vf.AssistantMessage(content=f"completion-{example_id}"),
+                sampled=True,
+                token_ids=[4, 5],
+                mask=[True, True],
+                logprobs=[-0.1, -0.2],
+            ),
         ],
-        "answer": f"answer-{example_id}",
-        "task": task,
-        "info": {"difficulty": "easy"},
-        "reward": reward,
-        "advantage": reward / 2,
-        "metrics": {"accuracy": reward},
-        "timing": {"generation": {"start": 0.0, "end": 12.5, "duration": 12.5}},
-    }
+    )
 
 
 def test_rollouts_to_parquet_bytes_preserves_all_rollouts_and_ids():
@@ -63,8 +63,11 @@ def test_rollouts_to_parquet_bytes_preserves_all_rollouts_and_ids():
     assert [row["sample_id"] for row in rows] == [0, 1]
     assert all(row["run_id"] == "run-123" for row in rows)
     assert all(row["step"] == 7 for row in rows)
-    assert json.loads(rows[0]["prompt"])[0]["content"] == "prompt-101"
-    assert json.loads(rows[1]["completion"])[0]["content"] == "completion-202"
+    first_messages = json.loads(rows[0]["completion"])
+    second_messages = json.loads(rows[1]["completion"])
+    assert rows[0]["prompt"] == ""
+    assert first_messages[0]["content"] == "prompt-101"
+    assert second_messages[1]["content"] == "completion-202"
 
 
 def test_rollouts_to_parquet_bytes_skips_rollouts_without_trajectory():
@@ -74,12 +77,7 @@ def test_rollouts_to_parquet_bytes_skips_rollouts_without_trajectory():
     parquet_bytes = monitor._rollouts_to_parquet_bytes(
         [
             _build_rollout(example_id=1, reward=1.0, task="task-a"),
-            {
-                "example_id": 2,
-                "prompt": [{"role": "user", "content": "missing-trajectory"}],
-                "completion": [{"role": "assistant", "content": "ignored"}],
-                "trajectory": [],
-            },
+            Rollout(task=vf.Task(idx=2, prompt="missing-trajectory")),
         ],
         step=3,
     )

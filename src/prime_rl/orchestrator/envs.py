@@ -29,7 +29,7 @@ from typing import Generic, TypeVar
 import verifiers.v1 as vf
 from verifiers.v1.serve import EnvClient, ModelRuntimeConfig, TraceAdvantages, env_config_data
 
-from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig, TrainEnvConfig
+from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig, TrainEnvConfig, pool_serve_kwargs
 from prime_rl.orchestrator.types import Rollout
 from prime_rl.utils.logger import get_logger
 
@@ -141,7 +141,7 @@ class Env:
                 log_file=str(log_file),
                 log_level=log_level,
                 json_logging=json_logging,
-                **vf.pool_serve_kwargs(self.config.pool),
+                **pool_serve_kwargs(self.config.pool),
                 address="tcp://127.0.0.1:0",
                 address_queue=address_queue,
                 **server_kwargs,

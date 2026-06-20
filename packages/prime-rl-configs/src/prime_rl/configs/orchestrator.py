@@ -4,9 +4,7 @@ from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import AliasChoices, ConfigDict, Field, SerializeAsAny, model_validator
 from renderers import AutoRendererConfig, RendererConfig
-from verifiers.v1.env import EnvServerConfig
-from verifiers.v1.harness import HarnessConfig
-from verifiers.v1.taskset import TasksetConfig
+from verifiers.v1 import HarnessConfig, TasksetConfig
 
 from prime_rl.configs.shared import (
     BaseModelConfig,
@@ -148,17 +146,75 @@ class EnvTasksetConfig(TasksetConfig):
     """Taskset config reference carried by prime-rl without importing the taskset package."""
 
     model_config = ConfigDict(extra="allow")
+    id: str = ""
 
 
 class EnvHarnessConfig(HarnessConfig):
     """Harness config reference carried by prime-rl without importing the harness package."""
 
     model_config = ConfigDict(extra="allow")
+    id: str = "default"
 
 
-class EnvConfig(EnvServerConfig):
+class TimeoutConfig(BaseConfig):
+    setup: float | None = None
+    rollout: float | None = None
+    finalize: float | None = None
+    scoring: float | None = None
+
+
+class RolloutRetryConfig(BaseConfig):
+    max_retries: int = Field(0, ge=0)
+    include: list[str] = []
+    exclude: list[str] = []
+
+
+class RetryConfig(BaseConfig):
+    rollout: RolloutRetryConfig = RolloutRetryConfig()
+
+
+class StaticPoolConfig(BaseConfig):
+    type: Literal["static"] = "static"
+    num_workers: int = Field(4, ge=1)
+
+
+class ElasticPoolConfig(BaseConfig):
+    type: Literal["elastic"] = "elastic"
+    max_workers: int | None = None
+    multiplex: int = Field(128, ge=1)
+
+
+PoolConfig: TypeAlias = Annotated[StaticPoolConfig | ElasticPoolConfig, Field(discriminator="type")]
+
+
+def pool_serve_kwargs(pool: StaticPoolConfig | ElasticPoolConfig) -> dict[str, int | bool | None]:
+    if isinstance(pool, ElasticPoolConfig):
+        return {"max_workers": pool.max_workers, "multiplex": pool.multiplex, "elastic": True}
+    return {"max_workers": pool.num_workers, "elastic": False}
+
+
+class EnvConfig(BaseConfig):
     taskset: SerializeAsAny[EnvTasksetConfig] = EnvTasksetConfig()
     harness: SerializeAsAny[EnvHarnessConfig] = EnvHarnessConfig(id="default")
+    timeout: TimeoutConfig = TimeoutConfig()
+    retries: RetryConfig = RetryConfig()
+    max_turns: int | None = None
+    max_input_tokens: int | None = None
+    max_output_tokens: int | None = None
+    max_total_tokens: int | None = None
+    multiplex: int = Field(32, ge=1)
+
+    id: str | None = None
+    """Classic (v0) env id, loaded via ``verifiers.load_environment`` and run through the legacy bridge."""
+
+    args: dict[str, object] = {}
+    """Construction kwargs forwarded to ``load_environment(id, **args)`` for v0 envs."""
+
+    extra_env_kwargs: dict[str, object] = {}
+    """Post-load kwargs applied to legacy v0 envs via ``env.set_kwargs``."""
+
+    pool: PoolConfig = ElasticPoolConfig()
+    """Worker-pool sizing for the env server."""
 
     name: str | None = None
     """Display name for this environment in logs, metrics, and buffer keys. Defaults to the taskset id. Must be unique across all envs in the same group."""
@@ -171,6 +227,14 @@ class EnvConfig(EnvServerConfig):
 
     max_retries: int = Field(3, ge=0)
     """Times the env server retries a failed rollout before returning an error."""
+
+    @property
+    def is_legacy(self) -> bool:
+        return self.id is not None and not self.taskset.id
+
+    @property
+    def env_id(self) -> str:
+        return self.taskset.id or self.id or ""
 
     @model_validator(mode="before")
     @classmethod

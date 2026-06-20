@@ -1,9 +1,9 @@
 from functools import partial
 
-from verifiers.v1 import pool_serve_kwargs
 from verifiers.v1.serve import serve_env
 
 from prime_rl.configs.env_server import EnvServerConfig
+from prime_rl.configs.orchestrator import pool_serve_kwargs
 from prime_rl.orchestrator.utils import setup_env_server_logging
 from prime_rl.utils.config import cli
 from prime_rl.utils.process import set_proc_title

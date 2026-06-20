@@ -88,7 +88,7 @@ def test_renderer_client_qwen3_vl_e2e_features_payload_roundtrips_through_vllm(t
     """
     from PIL import Image
     from renderers.base import load_tokenizer
-    from renderers.mm_store import IMAGE_REF_PREFIX, split_image_ref
+    from renderers.mm_store import IMAGE_REF_PREFIX, split_raw_mm_ref
     from renderers.qwen3_vl import Qwen3VLRenderer
     from transformers import AutoProcessor
     from verifiers.clients.renderer_client import RendererClient
@@ -176,15 +176,16 @@ def test_renderer_client_qwen3_vl_e2e_features_payload_roundtrips_through_vllm(t
     assert gen_req.features.kwargs_data is not None
     ref_items = gen_req.features.kwargs_data["image"]
     assert len(ref_items) == 1
-    ref = ref_items[0]
-    assert isinstance(ref, str)
-    assert ref.startswith(f"{IMAGE_REF_PREFIX}:")
-    run_id, _fingerprint, modality, mm_hash, raw_image_id, grid_thw = split_image_ref(ref)
-    assert run_id == "e2e"
-    assert modality == "image"
-    assert raw_image_id == image_path.name
-    assert mm_hash == gen_req.features.mm_hashes["image"][0]
-    assert grid_thw == response["multi_modal_data"].mm_items["image"][0]["image_grid_thw"][0]
+    ref_item = ref_items[0]
+    assert isinstance(ref_item, str)
+    assert ref_item.startswith(f"{IMAGE_REF_PREFIX}:")
+    ref = split_raw_mm_ref(ref_item)
+    assert ref.run_id == "e2e"
+    assert ref.modality == "image"
+    assert ref.raw_image_id == image_path.name
+    assert ref.mm_hash == gen_req.features.mm_hashes["image"][0]
+    persisted = response["multi_modal_data"].mm_items["image"][0]
+    assert ref.payload["image_grid_thw"] == persisted["payload"]["image_grid_thw"]
 
     # ── Response parsed through renderer's parse_response. ──────────────
     assert response["completion_ids"] == [50, 60, 151645]

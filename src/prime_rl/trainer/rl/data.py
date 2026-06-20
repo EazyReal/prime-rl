@@ -8,6 +8,7 @@ from torch import Tensor
 from transformers.tokenization_utils import PreTrainedTokenizer
 
 from prime_rl.configs.trainer import FakeDataLoaderConfig, MissingMMImagePolicy
+from prime_rl.multimodal.adapters.base import ForwardPolicy
 from prime_rl.trainer.rl.packer import BasePacker, setup_packer
 from prime_rl.trainer.runs import get_multi_run_manager
 from prime_rl.trainer.world import get_world
@@ -43,6 +44,7 @@ class TensorMicroBatch(TypedDict):
 
     # Generic multimodal kwargs materialized by the trainer's model processor.
     mm_kwargs: dict[str, Tensor] | None
+    mm_forward_policy: ForwardPolicy | None
     # mm_token_type_ids: token type per token [batch seq], int64 (0=text, 1=image, 2=video)
     mm_token_type_ids: Int[Tensor, "batch seq"] | None
 
@@ -126,6 +128,7 @@ class FakeDataLoader:
             "lora_num_tokens": lora_num_tokens,
             "routed_experts": None,
             "mm_kwargs": None,
+            "mm_forward_policy": None,
             "mm_token_type_ids": None,
             "training_mode": "rl",
             "run_id": None,
@@ -156,6 +159,7 @@ class FakeDataLoader:
             "lora_num_tokens": lora_num_tokens,
             "routed_experts": None,
             "mm_kwargs": None,
+            "mm_forward_policy": None,
             "mm_token_type_ids": None,
             "training_mode": "rl",
             "run_id": None,
@@ -225,12 +229,16 @@ class DataLoader:
             micro_batch.lora_num_tokens = [0] * self.multi_run_manager.max_runs
             micro_batch.lora_num_tokens[0] = len(micro_batch.input_ids)
         mm_kwargs: dict[str, Tensor] | None = None
+        mm_forward_policy: ForwardPolicy | None = None
         if micro_batch.mm_kwargs:
             raise ValueError("Processed multimodal mm_kwargs are unsupported in v1; use raw mm_refs")
         if micro_batch.mm_refs is not None:
             materialize_start = time.perf_counter()
             try:
-                mm_kwargs = self.mm_materializer.materialize(micro_batch.mm_refs)
+                materialized = self.mm_materializer.materialize(micro_batch.mm_refs)
+                if materialized is not None:
+                    mm_kwargs = materialized.kwargs
+                    mm_forward_policy = materialized.forward_policy
                 self.last_mm_materialize_time += time.perf_counter() - materialize_start
                 self.last_mm_images_materialized += len(micro_batch.mm_refs.uris)
             except FileNotFoundError as exc:
@@ -245,7 +253,10 @@ class DataLoader:
 
                 placeholder_start = time.perf_counter()
                 try:
-                    mm_kwargs = self.mm_materializer.synthesize_placeholder(micro_batch.mm_refs)
+                    materialized = self.mm_materializer.synthesize_placeholder(micro_batch.mm_refs)
+                    if materialized is not None:
+                        mm_kwargs = materialized.kwargs
+                        mm_forward_policy = materialized.forward_policy
                 except Exception as placeholder_exc:
                     get_logger().error(
                         f"raw image placeholder synthesis failed after missing image "
@@ -300,6 +311,7 @@ class DataLoader:
             env_names=micro_batch.env_names,
             lora_num_tokens=torch.tensor(micro_batch.lora_num_tokens, dtype=torch.int32),
             mm_kwargs=mm_kwargs,
+            mm_forward_policy=mm_forward_policy,
             mm_token_type_ids=torch.tensor(micro_batch.mm_token_type_ids, dtype=torch.long).unsqueeze(0)
             if micro_batch.mm_token_type_ids is not None
             else None,

@@ -27,6 +27,7 @@ from transformers.tokenization_utils import PreTrainedTokenizer
 from transformers.utils.import_utils import is_flash_attn_3_available
 
 from prime_rl.configs.trainer import ActivationCheckpointConfig, CompileConfig, ModelConfig, TokenizerConfig
+from prime_rl.multimodal.adapters.base import ForwardPolicy
 from prime_rl.trainer.distributed import DeepEPExpertParallel
 from prime_rl.trainer.lora import apply_lora_to_model, freeze_all_except_lora_and_specified, strip_lora_from_state_dict
 from prime_rl.trainer.models import (
@@ -1135,6 +1136,7 @@ def forward(
     # signature is the schema. ``mm_token_type_ids`` is split out because it's
     # prime-rl-computed from token ids.
     mm_kwargs: dict[str, Tensor] | None = None,
+    mm_forward_policy: ForwardPolicy | None = None,
     mm_token_type_ids: Int[Tensor, "batch seq"] | None = None,
 ) -> PrimeLmOutput:
     # Build kwargs for model forward
@@ -1150,11 +1152,10 @@ def forward(
         kwargs.update(mm_kwargs)
         if mm_token_type_ids is not None:
             kwargs["mm_token_type_ids"] = mm_token_type_ids
-        # ``position_ids`` for MRoPE families: Qwen3-VL's HF forward
-        # recomputes 3D positions from ``image_grid_thw`` and breaks if
-        # given the trainer's pre-computed 1D ``position_ids``. Detect
-        # via the mm_kwargs shape so we don't enumerate model_types.
-        if "image_grid_thw" not in mm_kwargs:
+        policy = mm_forward_policy or ForwardPolicy()
+        if policy.requires_mm_token_type_ids and mm_token_type_ids is None:
+            raise ValueError("Multimodal forward policy requires mm_token_type_ids")
+        if policy.pass_position_ids_with_mm:
             kwargs["position_ids"] = position_ids
     else:
         kwargs["position_ids"] = position_ids

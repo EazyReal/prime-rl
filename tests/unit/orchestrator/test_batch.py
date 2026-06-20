@@ -174,7 +174,18 @@ def test_prepare_sample_truncates_routed_experts():
 def _mm_refs() -> MMRefs:
     return MMRefs(
         descriptor={
-            "mm_items": {"image": [{"image_grid_thw": [[1, 1, 1]]}]},
+            "mm_items": {
+                "image": [
+                    {
+                        "kind": "prime_raw_mm_item",
+                        "version": 1,
+                        "modality": "image",
+                        "family": "qwen_vl",
+                        "layout_fingerprint": "f" * 32,
+                        "payload": {"image_grid_thw": [[1, 1, 1]]},
+                    }
+                ]
+            },
             "mm_hashes": {"image": ["a" * 32]},
         },
         uris=["file:///tmp/image.png"],

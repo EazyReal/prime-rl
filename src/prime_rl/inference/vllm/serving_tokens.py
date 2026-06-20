@@ -14,9 +14,9 @@ we subclass it to add them back:
    decisions, surface them as base64 raw-byte payloads without requiring a vLLM
    source fork.
 
-3. Raw image refs for multimodal rollouts — renderers send lightweight
-   ``mmraw:v1`` refs for new images and ``None`` for cache-only prior images.
-   This handler materializes refs into vLLM multimodal items and turns cache
+3. Raw image refs for multimodal rollouts — renderers send lightweight raw
+   descriptor refs for new images and ``None`` for cache-only prior images.
+   This handler materializes refs through multimodal adapters and turns cache
    misses into a structured retryable error.
 
 4. Server-side ``max_tokens`` defaulting — ``ServingTokens`` hands the
@@ -57,6 +57,8 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
 from prime_rl.inference.vllm.routed_experts import RoutedExpertsCapture
+from prime_rl.multimodal.registry import get_multimodal_adapter
+from prime_rl.multimodal.schema import RawMMItem
 
 
 @dataclass
@@ -141,17 +143,6 @@ def _missing_mm_cache_message(features: Any, exc: BaseException) -> str:
     return f"vLLM multimodal cache miss for {joined}{suffix}"
 
 
-def _processor_value(image_processor: Any, name: str, *, size_key: str | None = None) -> int:
-    value = getattr(image_processor, name, None)
-    if value is None and size_key is not None:
-        size = getattr(image_processor, "size", None)
-        if isinstance(size, dict):
-            value = size.get(size_key)
-    if value is None:
-        raise ValueError(f"Image processor is missing {name}")
-    return int(value)
-
-
 @lru_cache(maxsize=8)
 def _load_image_processor(model_name: str, trust_remote_code: bool):
     from transformers import AutoProcessor
@@ -163,21 +154,8 @@ def _load_image_processor(model_name: str, trust_remote_code: bool):
     return image_processor
 
 
-def _qwen_image_processor_fingerprint(image_processor: Any) -> str:
-    from renderers.mm_store import image_layout_fingerprint
-
-    return image_layout_fingerprint(
-        family="qwen_vl",
-        patch_size=_processor_value(image_processor, "patch_size"),
-        merge_size=_processor_value(image_processor, "merge_size"),
-        temporal_patch_size=_processor_value(image_processor, "temporal_patch_size"),
-        min_pixels=_processor_value(image_processor, "min_pixels", size_key="shortest_edge"),
-        max_pixels=_processor_value(image_processor, "max_pixels", size_key="longest_edge"),
-    )
-
-
 def _materialize_raw_image_ref_sync(
-    ref: str,
+    raw_ref: str,
     *,
     expected_modality: str,
     expected_hash: str,
@@ -186,42 +164,36 @@ def _materialize_raw_image_ref_sync(
     trust_remote_code: bool,
 ):
     from PIL import Image
-    from renderers.mm_store import raw_image_path, split_image_ref
-    from vllm.model_executor.models.qwen2_vl import _create_qwen2vl_field_factory
-    from vllm.multimodal.inputs import MultiModalKwargsItems
+    from renderers.mm_store import raw_image_path, split_mmraw_ref
 
     try:
-        run_id, fingerprint, modality, mm_hash, raw_image_id, grid_thw = split_image_ref(ref)
-        if modality != expected_modality:
-            raise ValueError(f"Expected modality {expected_modality!r}, got {modality!r}")
-        if mm_hash != expected_hash:
-            raise ValueError(f"Expected image hash {expected_hash}, got {mm_hash}")
+        ref = split_mmraw_ref(raw_ref)
+        if ref.modality != expected_modality:
+            raise ValueError(f"Expected modality {expected_modality!r}, got {ref.modality!r}")
+        if ref.mm_hash != expected_hash:
+            raise ValueError(f"Expected image hash {expected_hash}, got {ref.mm_hash}")
 
-        raw = raw_image_path(run_id=run_id, raw_image_id=raw_image_id).read_bytes()
+        raw = raw_image_path(run_id=ref.run_id, raw_image_id=ref.raw_image_id).read_bytes()
         actual_hash = hashlib.sha256(raw).hexdigest()[:32]
-        if actual_hash != mm_hash:
-            raise ValueError(f"Raw image hash mismatch: expected {mm_hash}, got {actual_hash}")
+        if actual_hash != ref.mm_hash:
+            raise ValueError(f"Raw image hash mismatch: expected {ref.mm_hash}, got {actual_hash}")
 
         image_processor = _load_image_processor(processor_model_name, trust_remote_code)
-        actual_fingerprint = _qwen_image_processor_fingerprint(image_processor)
-        if actual_fingerprint != fingerprint:
-            raise ValueError(f"Image layout fingerprint mismatch: expected {fingerprint}, got {actual_fingerprint}")
-
+        item = RawMMItem(
+            modality=ref.modality,
+            family=ref.family,
+            layout_fingerprint=ref.fingerprint,
+            payload=dict(ref.payload),
+            raw_ref=raw_ref,
+        )
+        adapter = get_multimodal_adapter(ref.family)
         image = Image.open(BytesIO(raw)).convert("RGB")
-        hf_inputs = image_processor(images=[image], return_tensors="pt")
-        merge_size = _processor_value(image_processor, "merge_size")
-        config_by_key = _create_qwen2vl_field_factory(merge_size)(hf_inputs)
-        item = MultiModalKwargsItems.from_hf_inputs(hf_inputs, config_by_key)["image"][0]
-
-        actual_grid = item["image_grid_thw"].data.tolist()
-        if actual_grid != grid_thw:
-            raise ValueError(f"Image grid mismatch: expected {grid_thw}, got {actual_grid}")
-        num_image_tokens = int(grid_thw[0] * grid_thw[1] * grid_thw[2] // (merge_size * merge_size))
-        if expected_placeholder_length is not None and expected_placeholder_length != num_image_tokens:
-            raise ValueError(
-                f"Image placeholder length mismatch: expected {expected_placeholder_length}, got {num_image_tokens}"
-            )
-        return item
+        return adapter.materialize_for_vllm(
+            image_processor,
+            item,
+            image,
+            expected_placeholder_length,
+        )
     except Exception as exc:
         raise _MMImageRefError(str(exc)) from exc
 
@@ -251,8 +223,8 @@ async def _decode_raw_mm_kwargs(
             if item is None:
                 decoded.append(None)
                 continue
-            if modality != "image" or not isinstance(item, str) or not item.startswith(f"{IMAGE_REF_PREFIX}:"):
-                raise _MMImageRefError("v1 multimodal inference accepts raw image refs only")
+            if not isinstance(item, str) or not item.startswith(f"{IMAGE_REF_PREFIX}:"):
+                raise _MMImageRefError("v1 multimodal inference accepts raw descriptor refs only")
             placeholder_length = placeholders[idx].length if idx < len(placeholders) else None
             decoded.append(
                 await asyncio.to_thread(

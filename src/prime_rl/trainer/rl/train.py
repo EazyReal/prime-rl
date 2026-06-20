@@ -395,6 +395,7 @@ def train(config: TrainerConfig):
             # Multimodal kwargs are materialized by the trainer model processor.
             mm_kwargs_raw = micro_batch.get("mm_kwargs")
             mm_kwargs = {k: v.to("cuda") for k, v in mm_kwargs_raw.items()} if mm_kwargs_raw else None
+            mm_forward_policy = micro_batch.get("mm_forward_policy")
             mm_token_type_ids = (
                 micro_batch["mm_token_type_ids"].to("cuda")
                 if micro_batch.get("mm_token_type_ids") is not None
@@ -444,6 +445,7 @@ def train(config: TrainerConfig):
                     labels=labels,
                     temperature=temperatures,
                     mm_kwargs=mm_kwargs,
+                    mm_forward_policy=mm_forward_policy,
                     mm_token_type_ids=mm_token_type_ids,
                     routed_experts=routed_experts,
                 )

@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import hashlib
-import math
 from collections.abc import Iterable, Mapping
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from urllib.parse import unquote, urlparse
 
+from prime_rl.multimodal.adapters.base import MaterializedMM
+from prime_rl.multimodal.registry import get_multimodal_adapter
+from prime_rl.multimodal.schema import (
+    RawMMItem,
+    contains_processed_payload_key,
+    parse_raw_mm_item,
+)
 from prime_rl.transport.types import MMRefs
-
-if TYPE_CHECKING:
-    import torch
 
 IMAGE_MODALITY = "image"
 SUPPORTED_MODALITIES = {IMAGE_MODALITY}
@@ -76,13 +79,14 @@ def _normalize_json_value(value: Any, path: str) -> Any:
 
 
 def validate_raw_mm_item(item: Mapping[str, Any]) -> dict[str, Any]:
-    forbidden = PROCESSED_MM_KEYS.intersection(item)
-    if forbidden:
+    if contains_processed_payload_key(item):
         raise TypeError(
             "v1 multimodal sidecars must be raw image descriptors, not processed payloads "
-            f"({', '.join(sorted(forbidden))})"
+            f"({', '.join(sorted(PROCESSED_MM_KEYS))})"
         )
-    return {str(k): _normalize_json_value(v, str(k)) for k, v in item.items()}
+    normalized = {str(k): _normalize_json_value(v, str(k)) for k, v in item.items()}
+    parse_raw_mm_item(normalized)
+    return normalized
 
 
 def _validate_modalities(mm_items: Mapping[str, list[Any]]) -> None:
@@ -152,34 +156,11 @@ def sha256_32(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:32]
 
 
-def _tensorize(value: Any) -> torch.Tensor:
-    import torch
-
-    if isinstance(value, torch.Tensor):
-        return value.contiguous()
-    return torch.as_tensor(value).contiguous()
-
-
-def _expected_image_grid(item: Mapping[str, Any]) -> list[int] | None:
-    grid = item.get("image_grid_thw")
-    if grid is None:
-        return None
-    if len(grid) == 1 and isinstance(grid[0], list):
-        grid = grid[0]
-    return [int(v) for v in grid]
-
-
-def _patch_area(patch_size: Any) -> int:
-    if isinstance(patch_size, list | tuple):
-        return math.prod(int(dim) for dim in patch_size)
-    size = int(patch_size)
-    return size * size
-
-
-def _temporal_patch_extent(temporal_patch_size: Any) -> int:
-    if isinstance(temporal_patch_size, list | tuple):
-        return math.prod(int(dim) for dim in temporal_patch_size)
-    return int(temporal_patch_size)
+def _single_family_adapter(items: list[RawMMItem]):
+    families = {item.family for item in items}
+    if len(families) != 1:
+        raise ValueError(f"Raw multimodal refs must use exactly one adapter family, got {sorted(families)}")
+    return get_multimodal_adapter(next(iter(families)))
 
 
 class RawImageMaterializer:
@@ -202,96 +183,55 @@ class RawImageMaterializer:
             self._image_processor = image_processor
         return self._image_processor
 
-    def materialize(self, refs: MMRefs | None) -> dict[str, torch.Tensor] | None:
+    def materialize(self, refs: MMRefs | None) -> MaterializedMM | None:
         if refs is None:
             return None
 
-        image_items = refs.descriptor.get("mm_items", {}).get(IMAGE_MODALITY, [])
+        image_item_dicts = refs.descriptor.get("mm_items", {}).get(IMAGE_MODALITY, [])
         image_hashes = refs.descriptor.get("mm_hashes", {}).get(IMAGE_MODALITY, [])
-        if not image_items:
+        if not image_item_dicts:
             return None
-        if len(refs.uris) != len(image_items) or len(image_hashes) != len(image_items):
+        if len(refs.uris) != len(image_item_dicts) or len(image_hashes) != len(image_item_dicts):
             raise ValueError(
                 "Raw image refs must have matching URI, descriptor, and hash counts "
-                f"(uris={len(refs.uris)}, descriptors={len(image_items)}, hashes={len(image_hashes)})"
+                f"(uris={len(refs.uris)}, descriptors={len(image_item_dicts)}, hashes={len(image_hashes)})"
             )
+        image_items = [parse_raw_mm_item(validate_raw_mm_item(item)) for item in image_item_dicts]
+        adapter = _single_family_adapter(image_items)
+        actual_fingerprint = adapter.processor_fingerprint(self.image_processor)
+        for item in image_items:
+            if item.layout_fingerprint != actual_fingerprint:
+                raise ValueError(
+                    "Raw image layout fingerprint mismatch: "
+                    f"expected {item.layout_fingerprint}, got {actual_fingerprint}"
+                )
 
         from PIL import Image
 
         images = []
-        for uri, item, expected_hash in zip(refs.uris, image_items, image_hashes, strict=True):
-            validate_raw_mm_item(item)
+        for uri, expected_hash in zip(refs.uris, image_hashes, strict=True):
             raw = file_uri_to_path(uri).read_bytes()
             actual_hash = sha256_32(raw)
             if actual_hash != expected_hash:
                 raise ValueError(f"Raw image hash mismatch for {uri}: expected {expected_hash}, got {actual_hash}")
             images.append(Image.open(BytesIO(raw)).convert("RGB"))
 
-        processed = self.image_processor(images=images, return_tensors="pt")
-        tensors = {str(k): _tensorize(v) for k, v in dict(processed).items()}
+        return adapter.materialize_for_trainer(self.image_processor, image_items, images)
 
-        expected_grids = [_expected_image_grid(item) for item in image_items]
-        if any(grid is not None for grid in expected_grids):
-            if "image_grid_thw" not in tensors:
-                raise ValueError("Image descriptors include image_grid_thw but the trainer processor did not return it")
-            actual_grids = tensors["image_grid_thw"].tolist()
-            for idx, expected in enumerate(expected_grids):
-                if expected is not None and actual_grids[idx] != expected:
-                    raise ValueError(
-                        f"Image grid mismatch at index {idx}: expected {expected}, got {actual_grids[idx]}"
-                    )
-
-        return tensors
-
-    def placeholder_feature_dim(self) -> int:
-        image_processor = self.image_processor
-        patch_size = getattr(image_processor, "patch_size", None)
-        temporal_patch_size = getattr(image_processor, "temporal_patch_size", None)
-        image_mean = getattr(image_processor, "image_mean", None)
-        channels = len(image_mean) if image_mean is not None else getattr(image_processor, "num_channels", 3)
-        if patch_size is None or temporal_patch_size is None:
-            raise ValueError(
-                "Cannot synthesize raw image placeholders without image processor patch_size and temporal_patch_size"
-            )
-        return int(channels) * _temporal_patch_extent(temporal_patch_size) * _patch_area(patch_size)
-
-    def synthesize_placeholder(self, refs: MMRefs | None) -> dict[str, torch.Tensor] | None:
-        """Build zero-valued Qwen-style image tensors from raw descriptor geometry.
-
-        This recovery path is only used when raw image files disappear before
-        trainer materialization. The original ``image_grid_thw`` is preserved so
-        the model sees the same placeholder geometry used during rollout
-        tokenization, while the dataloader masks the affected microbatch loss.
-        """
+    def synthesize_placeholder(self, refs: MMRefs | None) -> MaterializedMM | None:
+        """Build zero-valued multimodal tensors via the owning adapter."""
         if refs is None:
             return None
 
-        import torch
-
-        image_items = refs.descriptor.get("mm_items", {}).get(IMAGE_MODALITY, [])
+        image_item_dicts = refs.descriptor.get("mm_items", {}).get(IMAGE_MODALITY, [])
         image_hashes = refs.descriptor.get("mm_hashes", {}).get(IMAGE_MODALITY, [])
-        if not image_items:
+        if not image_item_dicts:
             return None
-        if len(refs.uris) != len(image_items) or len(image_hashes) != len(image_items):
+        if len(refs.uris) != len(image_item_dicts) or len(image_hashes) != len(image_item_dicts):
             raise ValueError(
                 "Raw image refs must have matching URI, descriptor, and hash counts "
-                f"(uris={len(refs.uris)}, descriptors={len(image_items)}, hashes={len(image_hashes)})"
+                f"(uris={len(refs.uris)}, descriptors={len(image_item_dicts)}, hashes={len(image_hashes)})"
             )
-
-        feature_dim = self.placeholder_feature_dim()
-        pixel_values: list[torch.Tensor] = []
-        image_grid_thw: list[list[int]] = []
-        for idx, item in enumerate(image_items):
-            validate_raw_mm_item(item)
-            grid = _expected_image_grid(item)
-            if grid is None:
-                raise ValueError(f"Cannot synthesize image placeholder {idx}: image_grid_thw is missing")
-            if len(grid) != 3 or any(dim <= 0 for dim in grid):
-                raise ValueError(f"Cannot synthesize image placeholder {idx}: invalid image_grid_thw={grid}")
-            pixel_values.append(torch.zeros((math.prod(grid), feature_dim), dtype=torch.float32))
-            image_grid_thw.append(grid)
-
-        return {
-            "pixel_values": torch.cat(pixel_values, dim=0).contiguous(),
-            "image_grid_thw": torch.tensor(image_grid_thw, dtype=torch.long),
-        }
+        image_items = [parse_raw_mm_item(validate_raw_mm_item(item)) for item in image_item_dicts]
+        adapter = _single_family_adapter(image_items)
+        return adapter.synthesize_placeholder(self.image_processor, image_items)

@@ -1,11 +1,11 @@
-# Debug OPD (on-policy distillation) run on the v1 env server (reverse-text-v1).
-# Student generates rollouts (renderer client); teacher computes logprobs.
-# Start the teacher inference server first (on a separate GPU):
+# Debug SFT distillation run on the v1 env server (reverse-text-v1).
+# The reference endpoint is selected as the actor and returns policy-token ids.
+# Start the reference inference server first (on a separate GPU):
 #   CUDA_VISIBLE_DEVICES=1 uv run inference \
 #     --model.name PrimeIntellect/Qwen3-0.6B-Reverse-Text-RL \
 #     --server.port 8001 --gpu-memory-utilization 0.5 --model.enforce-eager
 # Then:
-#   uv run rl @ configs/v1/training_mode/opd.toml
+#   uv run rl @ configs/v1/advantages/sft.toml
 
 max_steps = 20
 seq_len = 2048
@@ -15,12 +15,20 @@ name = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
 
 [wandb]
 project = "reverse-text-v1-debug"
-name = "debug-opd"
+name = "debug-sft"
 
 [orchestrator]
-training_mode = "opd"
 batch_size = 128
-group_size = 16
+group_size = 4
+actor = "reference"
+advantages = ["sft"]
+
+[orchestrator.models.reference]
+name = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-RL"
+tokens = true
+
+[orchestrator.models.reference.client]
+base_url = ["http://localhost:8001/v1"]
 
 [orchestrator.renderer]
 name = "qwen3"
@@ -42,12 +50,6 @@ max_completion_tokens = 128
 [[orchestrator.eval.env]]
 taskset = { id = "reverse-text-v1" }
 harness = { id = "default", runtime = { type = "subprocess" } }
-
-[orchestrator.teacher.model]
-name = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-RL"
-
-[orchestrator.teacher.client]
-base_url = ["http://localhost:8001/v1"]
 
 [trainer.optim]
 lr = 3e-6
